@@ -72,13 +72,16 @@ Regular agents are detected under `<transcript>/subagents/agent-*.meta.json` wit
 
 ### Workflow tracking
 
-Workflow subagents live under `<transcript>/subagents/workflows/wf_<id>/agent-*.jsonl`. The workflow name is resolved from `<transcript>/workflows/scripts/<name>-<wf_id>.js`. Tokens are aggregated across all sub-agents in the workflow. Each workflow renders as its own line:
+Workflow subagents live under `<transcript>/subagents/workflows/wf_<id>/agent-*.jsonl`. The workflow name is resolved from `<transcript>/workflows/scripts/<name>-<wf_id>.js`. Tokens are aggregated across all sub-agents in the workflow. Each workflow renders as two lines: a one-liner summary and a phase breakdown:
 
 ```
 → deep-research (105 agents) 149k 12k/m (Sonnet)
+   Scope 1/1 ✓  Search 5/5 ✓  Fetch 23/23 ✓  Verify 75/75 ✓  Synthesize 0/1
 ```
 
-The `Workflow` and `SubCount` fields on agent data distinguish workflow entries from regular agents.
+Phase breakdown is derived by parsing `meta.phases` from the workflow script, then classifying each agent by matching its first user message against known prompt prefixes (e.g. `## Web Searcher` -> Search, `## Source Extractor` -> Fetch). Phase and completion state are cached per-agent in `.sl_agents_<sid>`. If >50% of agents can't be classified, the phase line is omitted and only the one-liner is shown.
+
+The `Workflow`, `SubCount`, and `Phases` fields on agent data distinguish workflow entries from regular agents.
 
 ### Per-session state files
 
@@ -110,6 +113,6 @@ Note: the bash `vis_len` function uses sed to replace known multi-byte character
 
 ## Parity: statusline.sh
 
-The Bash implementation is currently in sync with the PowerShell version. Both have: no-leading-zero cache timer, full collapse cascade, proportional bar squeezing, workflow detection with 120s recency filter.
+The Bash implementation is behind the PowerShell version. Both have: no-leading-zero cache timer, full collapse cascade, proportional bar squeezing, workflow detection with 120s recency filter. PowerShell-only: workflow phase breakdown.
 
 Only backport changes to the Bash version when explicitly asked.
