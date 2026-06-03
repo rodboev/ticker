@@ -8,7 +8,7 @@ $ErrorActionPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 # ── Tuning constants ────────────────────────────────────
-$WIDTH            = 130     # terminal width (default 120)
+$WIDTH            = 120     # terminal width (default 120)
 $OAUTH_TTL        = 60      # seconds between OAuth usage API calls
 $FULL_INTERVAL    = 10      # seconds between full recomputes (no agents)
 $AGENT_INTERVAL   = 5       # seconds between full recomputes (agents active)
@@ -24,7 +24,6 @@ function fg($r,$g,$b) { "$e[38;2;${r};${g};${b}m" }
 
 $cModel = fg 113 172 255
 $cProj  = fg 255 215 90
-$cCwd   = fg 235 160 90
 $cAdd   = fg 152 195 121
 $cDel   = fg 210 110 130
 $cGray  = fg 170 170 176
@@ -126,7 +125,6 @@ function writeComputeCache {
 # ── Extract fields ───────────────────────────────────────
 $transcript = $d.transcript_path
 $projectDir = $d.workspace.project_dir
-$cwd        = if ($d.workspace.current_dir) { $d.workspace.current_dir } else { $d.cwd }
 $model      = $d.model.display_name
 $effort     = $d.effort.level
 $ctxPct     = if ($null -ne $d.context_window.used_percentage)    { [double]$d.context_window.used_percentage }    else { 0 }
@@ -690,12 +688,6 @@ if ($proj) {
     } else {
         $segments['project'] = "${cProj}`u{1F4C1} ${proj} ${cDim}(untracked)"
     }
-}
-
-if ($cwd -and $projectDir -and $cwd -ne $projectDir) {
-    $rel = $cwd.Replace($projectDir, '').TrimStart('\','/')
-    if (-not $rel) { $rel = Split-Path $cwd -Leaf }
-    $segments['cwd'] = "${cCwd}${rel}"
 }
 
 if ($inGit -and ($linesAdd -gt 0 -or $linesDel -gt 0)) {

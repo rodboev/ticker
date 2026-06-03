@@ -19,7 +19,6 @@ RST=$'\033[0m'
 
 C_MODEL=$(fg 113 172 255)
 C_PROJ=$(fg 255 215 90)
-C_CWD=$(fg 235 160 90)
 C_ADD=$(fg 152 195 121)
 C_DEL=$(fg 210 110 130)
 C_GRAY=$(fg 170 170 176)
@@ -86,7 +85,6 @@ fmt_tok() {
 # ── Extract fields always needed ─────────────────────────
 TRANSCRIPT=$(echo "$input" | jq -r '.transcript_path // empty')
 PROJECT_DIR=$(echo "$input" | jq -r '.workspace.project_dir // empty')
-CWD=$(echo "$input" | jq -r '.workspace.current_dir // .cwd // empty')
 MODEL=$(echo "$input" | jq -r '.model.display_name // empty')
 EFFORT=$(echo "$input" | jq -r '.effort.level // empty')
 CTX_PCT=$(echo "$input" | jq -r '.context_window.used_percentage // 0')
@@ -625,13 +623,6 @@ if [ -n "$PROJ" ]; then
   fi
 fi
 
-if [ -n "$CWD" ] && [ -n "$PROJECT_DIR" ] && [ "$CWD" != "$PROJECT_DIR" ]; then
-  REL="${CWD#"$PROJECT_DIR"}"
-  REL="${REL#/}" ; REL="${REL#\\}"
-  [ -z "$REL" ] && REL=$(basename "$CWD")
-  OUT+="${SEP}${C_CWD}${REL}"
-fi
-
 LADD=$(awk "BEGIN { print int(${LINES_ADD:-0}) }")
 LDEL=$(awk "BEGIN { print int(${LINES_DEL:-0}) }")
 if [ "$IN_GIT" = "true" ] && (( LADD > 0 || LDEL > 0 )); then
@@ -697,9 +688,6 @@ _rebuild_bars() {
     else
       OUT+="${C_PROJ}📁 ${PROJ} ${C_DIM}(untracked)"
     fi
-  fi
-  if [ -n "$CWD" ] && [ -n "$PROJECT_DIR" ] && [ "$CWD" != "$PROJECT_DIR" ]; then
-    OUT+="${SEP}${C_CWD}${REL}"
   fi
   if [ "$IN_GIT" = "true" ] && (( LADD > 0 || LDEL > 0 )); then
     OUT+="${SEP}${C_ADD}+${LADD}${C_DEL}/-${LDEL}"
