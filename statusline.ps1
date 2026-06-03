@@ -8,7 +8,7 @@ $ErrorActionPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 # ── Tuning constants ────────────────────────────────────
-$WIDTH            = 99     # terminal width (default 120)
+$WIDTH            = 130     # terminal width (default 120)
 $OAUTH_TTL        = 60      # seconds between OAuth usage API calls
 $FULL_INTERVAL    = 10      # seconds between full recomputes (no agents)
 $AGENT_INTERVAL   = 5       # seconds between full recomputes (agents active)
@@ -754,7 +754,7 @@ function rebuildBars {
 
 $collapseSteps = @(
     { if ($segments.Contains('cache') -and $cacheRemaining) {
-        $segments['cache'] = "$(tierColor $cacheElapsedPct @(30,60,80))-${cacheRemaining}"
+        $segments['cache'] = "$(tierColor $cacheElapsedPct @(30,60,80))${cacheRemaining}"
     } }
     { if ($segments.Contains('model') -and $ctxSize -ge 1000000) {
         $ms = "${cModel}$($model -replace '\s*\(1M context\)', '')"

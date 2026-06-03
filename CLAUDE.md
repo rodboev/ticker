@@ -41,7 +41,7 @@ When the rendered line exceeds `$WIDTH - 4`, steps fire in order until it fits. 
 
 | Step | What | Saves |
 |------|------|-------|
-| 1 | `cache 4m5s` -> `-4m5s` | ~5 chars |
+| 1 | `cache 4m5s` -> `4m5s` | 6 chars |
 | 2 | ` [1M]` removed from model | 5 chars |
 | 3-6 | Bars squeeze 8->7->6->5->4 | ~3 chars/step (1 per visible bar) |
 | 7 | 5h rate string `(↑N%/hr)` dropped | ~10 chars |
@@ -50,7 +50,7 @@ When the rendered line exceeds `$WIDTH - 4`, steps fire in order until it fits. 
 | 10 | 5h bar -> text-only `5h: N%` | ~8 chars |
 | 11 | 5h removed entirely | ~10 chars |
 
-The collapsed cache dash inherits the same `tierColor` as the countdown text. Bars squeeze by 1 char at a time (recovering ~3 chars per step across all visible bars) down to minimum width 4 (half of the default 8).
+When collapsed, only the countdown is shown with no prefix. Bars squeeze by 1 char at a time (recovering ~3 chars per step across all visible bars) down to minimum width 4 (half of the default 8).
 
 The `rebuildBars` function preserves existing collapse state via `$script:rateDropped` so squeezing bars doesn't re-attach a previously dropped rate string.
 

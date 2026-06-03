@@ -721,9 +721,9 @@ _rebuild_bars() {
 _1m_removed=false
 
 # Collapse cascade
-# 1. cache label -> dash
+# 1. cache label removed
 if _over && [ -n "$SEG_CACHE" ]; then
-  SEG_CACHE="${SEP}$(pct_color "$CACHE_ELAPSED_PCT")-${CACHE_REMAINING}"
+  SEG_CACHE="${SEP}$(pct_color "$CACHE_ELAPSED_PCT")${CACHE_REMAINING}"
 fi
 # 2. [1M] removed
 if _over && (( CTX_INT >= 1000000 )); then
