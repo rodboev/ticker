@@ -253,7 +253,8 @@ _write_compute_cache() {
       _agents_json+=",\"rate\":${_a_rates[$_i]:-null}"
       _agents_json+=",\"model\":$(printf '%s' "${_a_models[$_i]}" | jq -Rs .)"
       _agents_json+=",\"workflow\":$(printf '%s' "${_a_workflows[$_i]}" | jq -Rs .)"
-      _agents_json+=",\"subcount\":${_a_subcounts[$_i]:-0}}"
+      _agents_json+=",\"subcount\":${_a_subcounts[$_i]:-0}"
+      _agents_json+=",\"phases\":$(printf '%s' "${_a_phases[$_i]:-[]}" | jq -Rc .)}"
     done
     _agents_json+="]"
   fi
@@ -313,7 +314,7 @@ if $_do_full; then
 
   # Seed expensive fields from stale cache (or defaults)
   CACHE_EPOCH=0; CACHE_TTL=300; BRANCH=""; IN_GIT=false
-  _ac=0; _a_descs=() _a_toks=() _a_rates=() _a_models=() _a_workflows=() _a_subcounts=()
+  _ac=0; _a_descs=() _a_toks=() _a_rates=() _a_models=() _a_workflows=() _a_subcounts=() _a_phases=()
   if [ -f "$COMPUTE_CACHE" ]; then
     BRANCH=$(jq -r '.branch // empty' "$COMPUTE_CACHE" 2>/dev/null)
     IN_GIT=$(jq -r '.in_git // false' "$COMPUTE_CACHE" 2>/dev/null)
@@ -460,6 +461,7 @@ if $_do_full; then
         _a_models+=("$_model")
         _a_workflows+=("")
         _a_subcounts+=(0)
+        _a_phases+=("[]")
       done
 
       # ── Workflow subagents (subagents/workflows/wf_*/) ──
@@ -477,6 +479,63 @@ if $_do_full; then
               _wf_name=$(basename "$_script_match" | sed "s/-${_wf_id}\\.js$//")
             fi
           fi
+
+          # Phase detection: try state JSON (completed), fall back to script+journal (running)
+          _wf_phase_json="[]"
+          _wf_state_file="$_session_dir/workflows/${_wf_id}.json"
+          if [ -f "$_wf_state_file" ]; then
+            _wf_phase_json=$(jq -c '
+              (.phases // []) as $ph |
+              if ($ph | length) == 0 then [] else
+                [(.workflowProgress // []) | group_by(.phaseTitle) | .[] |
+                  {t: .[0].phaseTitle, n: length, d: [.[] | select(.state == "done")] | length}
+                ] | [($ph | .[].title) as $t | {t: $t, n: 0, d: 0}] as $empty |
+                reduce ($empty[] + .[]) as $x ({}; .[$x.t].t = $x.t | .[$x.t].n += $x.n | .[$x.t].d += $x.d) |
+                [($ph | .[].title) as $t | .[$t] // {t: $t, n: 0, d: 0}]
+              end
+            ' "$_wf_state_file" 2>/dev/null)
+            _sn=$(jq -r '.workflowName // empty' "$_wf_state_file" 2>/dev/null)
+            [ -n "$_sn" ] && _wf_name="$_sn"
+          fi
+          if [ "$_wf_phase_json" = "[]" ] || [ -z "$_wf_phase_json" ]; then
+            _wf_script=$(ls "$_script_dir"/*-"${_wf_id}.js" 2>/dev/null | head -1)
+            if [ -n "$_wf_script" ]; then
+              _wf_phase_titles=$(sed -n "s/.*{ *title: *['\"]\\([^'\"]*\\)['\"].*/\\1/p" "$_wf_script" 2>/dev/null)
+              if [ -n "$_wf_phase_titles" ]; then
+                _journal="$_wf_folder/journal.jsonl"
+                if [ -f "$_journal" ]; then
+                  _wf_phase_json=$(awk -v titles="$_wf_phase_titles" '
+                    BEGIN {
+                      n = split(titles, ph, "\n")
+                      for (i=1; i<=n; i++) { cnt[ph[i]]=0; done[ph[i]]=0; order[i]=ph[i] }
+                      pidx=1; seen_result=0
+                    }
+                    {
+                      if (match($0, /"type":"started".*"agentId":"([^"]+)"/, m)) {
+                        if (seen_result && pidx < n) { pidx++; seen_result=0 }
+                        cnt[order[pidx]]++
+                        agent_ph[m[1]] = order[pidx]
+                      }
+                      if (match($0, /"type":"result".*"agentId":"([^"]+)"/, m)) {
+                        seen_result=1
+                        if (m[1] in agent_ph) done[agent_ph[m[1]]]++
+                      }
+                    }
+                    END {
+                      printf "["
+                      for (i=1; i<=n; i++) {
+                        if (i>1) printf ","
+                        gsub(/"/, "\\\"", order[i])
+                        printf "{\"t\":\"%s\",\"n\":%d,\"d\":%d}", order[i], cnt[order[i]], done[order[i]]
+                      }
+                      printf "]"
+                    }
+                  ' "$_journal" 2>/dev/null)
+                fi
+              fi
+            fi
+          fi
+          [ -z "$_wf_phase_json" ] && _wf_phase_json="[]"
 
           _wf_total_tok=0 _wf_first_ts="" _wf_last_write=0 _wf_sub_count=0 _wf_model=""
           for _wjf in "$_wf_folder"agent-*.jsonl; do
@@ -552,6 +611,7 @@ if $_do_full; then
           _a_models+=("$_wf_model")
           _a_workflows+=("$_wf_id")
           _a_subcounts+=("$_wf_sub_count")
+          _a_phases+=("$_wf_phase_json")
         done
       fi
 
@@ -575,13 +635,16 @@ else
   CACHE_TTL=$(jq -r '.cache_ttl // 300' "$COMPUTE_CACHE" 2>/dev/null)
 
   _ac=0
-  _a_descs=() _a_toks=() _a_rates=() _a_models=() _a_workflows=() _a_subcounts=()
+  _a_descs=() _a_toks=() _a_rates=() _a_models=() _a_workflows=() _a_subcounts=() _a_phases=()
   _agent_count=$(jq -r '.agents | length // 0' "$COMPUTE_CACHE" 2>/dev/null)
   for (( _i=0; _i<_agent_count; _i++ )); do
     _a_descs+=($(jq -r ".agents[$_i].short // \"agent\"" "$COMPUTE_CACHE" 2>/dev/null))
     _a_toks+=($(jq -r ".agents[$_i].tokens // 0" "$COMPUTE_CACHE" 2>/dev/null))
     _a_rates+=($(jq -r ".agents[$_i].rate // empty" "$COMPUTE_CACHE" 2>/dev/null))
     _a_models+=($(jq -r ".agents[$_i].model // empty" "$COMPUTE_CACHE" 2>/dev/null))
+    _a_workflows+=($(jq -r ".agents[$_i].workflow // empty" "$COMPUTE_CACHE" 2>/dev/null))
+    _a_subcounts+=($(jq -r ".agents[$_i].subcount // 0" "$COMPUTE_CACHE" 2>/dev/null))
+    _a_phases+=($(jq -rc ".agents[$_i].phases // []" "$COMPUTE_CACHE" 2>/dev/null))
   done
   _ac=${#_a_descs[@]}
 fi
@@ -751,7 +814,7 @@ WORKFLOW_LINES=""
 if (( _ac > 0 )); then
   # Split regular agents from workflows
   _reg_count=0 _reg_descs=() _reg_toks=() _reg_rates=() _reg_models=()
-  _wf_count=0 _wf_descs=() _wf_toks=() _wf_rates=() _wf_models=() _wf_subcounts=()
+  _wf_count=0 _wf_descs=() _wf_toks=() _wf_rates=() _wf_models=() _wf_subcounts=() _wf_phases=()
   for (( _i=0; _i<_ac; _i++ )); do
     if [ -n "${_a_workflows[$_i]}" ]; then
       _wf_descs+=("${_a_descs[$_i]}")
@@ -759,6 +822,7 @@ if (( _ac > 0 )); then
       _wf_rates+=("${_a_rates[$_i]}")
       _wf_models+=("${_a_models[$_i]}")
       _wf_subcounts+=("${_a_subcounts[$_i]}")
+      _wf_phases+=("${_a_phases[$_i]}")
       (( _wf_count++ ))
     else
       _reg_descs+=("${_a_descs[$_i]}")
@@ -805,6 +869,23 @@ if (( _ac > 0 )); then
     fi
     [ -n "${_wf_models[$_i]}" ] && _wl+=" ${C_DIM}(${_wf_models[$_i]})"
     WORKFLOW_LINES+=$'\n'"${_wl}"
+
+    _pj="${_wf_phases[$_i]}"
+    if [ -n "$_pj" ] && [ "$_pj" != "[]" ]; then
+      _phase_line="   "
+      _pn=$(echo "$_pj" | jq -r 'length' 2>/dev/null)
+      for (( _pi=0; _pi<_pn; _pi++ )); do
+        _pt=$(echo "$_pj" | jq -r ".[$_pi].t" 2>/dev/null)
+        _pd=$(echo "$_pj" | jq -r ".[$_pi].d" 2>/dev/null)
+        _pc=$(echo "$_pj" | jq -r ".[$_pi].n" 2>/dev/null)
+        (( _pi > 0 )) && _phase_line+="  "
+        _phase_line+="${C_DIM}${_pt} ${C_GRAY}${_pd}/${_pc}"
+        if (( _pc > 0 && _pd == _pc )); then
+          _phase_line+=" $(fg 152 195 121)✓"
+        fi
+      done
+      WORKFLOW_LINES+=$'\n'"${_phase_line}"
+    fi
   done
 fi
 

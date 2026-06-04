@@ -83,6 +83,114 @@ foreach ($c in $cases) {
     Write-Output "Timer ${remain}s -> '${got}' expect '${expect}' [$tag]"
 }
 
+# ── Workflow phase progress test ─────────────────────────
+Write-Output ""
+Write-Output "Workflow phase progress:"
+
+$wfSid = "test-wf-phases"
+$wfSessionDir = "$claudeDir\projects\test-wf-session\$wfSid"
+$wfTranscript = "$wfSessionDir.jsonl"
+$wfSubagentsDir = "$wfSessionDir\subagents\workflows\wf_test123"
+$wfScriptDir = "$wfSessionDir\workflows\scripts"
+
+# Create mock directory structure
+New-Item -ItemType Directory -Path $wfSubagentsDir -Force | Out-Null
+New-Item -ItemType Directory -Path $wfScriptDir -Force | Out-Null
+
+# Create the mock workflow script with phases
+@"
+export const meta = {
+  name: 'test-workflow',
+  description: 'Test workflow with two phases',
+  phases: [
+    { title: 'Find', detail: 'search agents' },
+    { title: 'Verify', detail: 'verify agents' },
+  ],
+}
+phase('Find')
+const results = await parallel(items.map(d => () => agent(d.prompt, { phase: 'Find', schema: S })))
+phase('Verify')
+const verified = await parallel(toVerify.map(c => () => agent(c.prompt, { phase: 'Verify', schema: V })))
+"@ | Set-Content "$wfScriptDir\test-workflow-wf_test123.js"
+
+# Create journal: 3 Find agents start, 2 complete, then 2 Verify agents start, 1 completes
+$journalLines = @(
+    '{"type":"started","key":"k1","agentId":"agent-a1"}'
+    '{"type":"started","key":"k2","agentId":"agent-a2"}'
+    '{"type":"started","key":"k3","agentId":"agent-a3"}'
+    '{"type":"result","key":"k1","agentId":"agent-a1","result":{}}'
+    '{"type":"result","key":"k2","agentId":"agent-a2","result":{}}'
+    '{"type":"result","key":"k3","agentId":"agent-a3","result":{}}'
+    '{"type":"started","key":"k4","agentId":"agent-a4"}'
+    '{"type":"started","key":"k5","agentId":"agent-a5"}'
+    '{"type":"result","key":"k4","agentId":"agent-a4","result":{}}'
+)
+$journalLines -join "`n" | Set-Content "$wfSubagentsDir\journal.jsonl"
+
+# Create mock agent jsonl files (recent mtime so they pass the 120s freshness check)
+$ts = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
+foreach ($aid in @('a1','a2','a3','a4','a5')) {
+    $meta = '{"agentType":"workflow-subagent"}'
+    $meta | Set-Content "$wfSubagentsDir\agent-${aid}.meta.json"
+    $content = "{`"message`":{`"role`":`"user`",`"content`":`"test`"},`"timestamp`":`"$ts`"}`n"
+    $content += "{`"message`":{`"role`":`"assistant`",`"model`":`"claude-sonnet-4-6`",`"usage`":{`"output_tokens`":500},`"content`":`"ok`"},`"timestamp`":`"$ts`"}"
+    $content | Set-Content "$wfSubagentsDir\agent-${aid}.jsonl"
+}
+
+# Create a minimal transcript file so the statusline finds it
+"" | Set-Content $wfTranscript
+
+# Prepare mock JSON for statusline
+$wfBase = @{
+    model = @{ display_name = "Opus 4.8" }
+    effort = @{ level = "xhigh" }
+    context_window = @{ used_percentage = 10; context_window_size = 1000000 }
+    workspace = @{ project_dir = "C:\test\project" }
+    transcript_path = $wfTranscript
+}
+
+Remove-Item "$claudeDir\.sl_compute_$wfSid" -Force -ErrorAction SilentlyContinue
+Remove-Item "$claudeDir\.sl_agents_$wfSid" -Force -ErrorAction SilentlyContinue
+
+$wfPatched = $src -replace '(?m)^\$WIDTH\s*=\s*\d+', '$WIDTH = 160'
+$wfTmp = "$claudeDir\.test_wf.ps1"
+$wfPatched | Set-Content $wfTmp -NoNewline
+
+$wfJson = $wfBase | ConvertTo-Json -Depth 5
+$wfOut = $wfJson | pwsh -NoProfile -File $wfTmp 2>$null
+$wfLines = $wfOut -split "`n"
+
+Write-Output "Output lines:"
+foreach ($l in $wfLines) { Write-Output "  $(strip $l)" }
+
+# Check: should have a workflow line and a phase line
+$hasWorkflowLine = $false
+$hasPhaseFind = $false
+$hasPhaseVerify = $false
+foreach ($l in $wfLines) {
+    $plain = strip $l
+    if ($plain -match '(test-workflow|wf_test123).*agents') { $hasWorkflowLine = $true }
+    if ($plain -match 'Find\s+\d+/\d+') { $hasPhaseFind = $true }
+    if ($plain -match 'Verify\s+\d+/\d+') { $hasPhaseVerify = $true }
+}
+
+$wfTests = @(
+    @("Workflow line present", $hasWorkflowLine),
+    @("Find phase shown",     $hasPhaseFind),
+    @("Verify phase shown",   $hasPhaseVerify)
+)
+foreach ($t in $wfTests) {
+    $tag = if ($t[1]) { "PASS" } else { $failures++; "FAIL" }
+    Write-Output "$($t[0]) [$tag]"
+}
+
+# Cleanup
+Remove-Item $wfTmp -Force -ErrorAction SilentlyContinue
+Remove-Item "$claudeDir\.sl_compute_$wfSid" -Force -ErrorAction SilentlyContinue
+Remove-Item "$claudeDir\.sl_agents_$wfSid" -Force -ErrorAction SilentlyContinue
+Remove-Item "$claudeDir\projects\test-wf-session" -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item $wfTranscript -Force -ErrorAction SilentlyContinue
+
 Write-Output ""
 if ($failures -eq 0) { Write-Output "All tests passed." }
 else { Write-Output "$failures failure(s)."; exit 1 }

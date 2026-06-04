@@ -455,64 +455,85 @@ if ($doFullCompute) {
                 foreach ($wfFolder in Get-ChildItem "$wfDir/wf_*" -Directory -ErrorAction SilentlyContinue) {
                     $wfId = $wfFolder.Name
                     $wfName = $wfId
-                    $wfScriptFile = $null
                     if (Test-Path $scriptDir) {
                         $scriptMatch = Get-ChildItem "$scriptDir/*-${wfId}.js" -ErrorAction SilentlyContinue | Select-Object -First 1
-                        if ($scriptMatch) {
-                            $wfName = $scriptMatch.Name -replace "-${wfId}\.js$", ''
-                            $wfScriptFile = $scriptMatch.FullName
-                        }
+                        if ($scriptMatch) { $wfName = $scriptMatch.Name -replace "-${wfId}\.js$", '' }
                     }
 
-                    # Parse phase titles and build prompt-prefix-to-phase map from the workflow script
+                    # Phase detection: try state JSON first (completed workflows), fall back to script+journal (running workflows)
                     $wfPhases = @()
-                    $phasePromptPrefixes = @{}
-                    if ($wfScriptFile) {
+                    $phaseCounters = @{}
+                    $phaseDone = @{}
+                    $wfStateFile = "$sessionDir/workflows/${wfId}.json"
+                    $_phasesResolved = $false
+                    if (Test-Path $wfStateFile) {
                         try {
-                            $scriptContent = Get-Content $wfScriptFile -Raw
-                            if ($scriptContent -match 'phases\s*:\s*\[(\{[^\]]+)\]') {
-                                $pArr = "[$($Matches[1])]" | ConvertFrom-Json -ErrorAction Stop
-                                $wfPhases = @($pArr | ForEach-Object { $_.title })
-                            }
-                            # Extract phase from agent() opts: {phase: "PhaseName", ...}
-                            # Also find the prompt variable/function name to resolve its ## header
-                            $agentRe = [regex]'agent\(\s*([A-Z_]+(?:\([^)]*\))?|"[^"]*")\s*,\s*\{[^}]*?phase\s*:\s*"([^"]+)"'
-                            foreach ($m in $agentRe.Matches($scriptContent)) {
-                                $promptRef = $m.Groups[1].Value
-                                $phase = $m.Groups[2].Value
-                                # If prompt is a template function like SEARCH_PROMPT(angle), find its definition's ## header
-                                if ($promptRef -match '^([A-Z_]+)') {
-                                    $fnName = $Matches[1]
-                                    $defRe = [regex]("${fnName}\s*=\s*(?:\([^)]*\)\s*=>|function)")
-                                    if ($defRe.IsMatch($scriptContent)) {
-                                        $defPos = $defRe.Match($scriptContent).Index
-                                        $afterDef = $scriptContent.Substring($defPos, [math]::Min(500, $scriptContent.Length - $defPos))
-                                        if ($afterDef -match '##\s+([^\\\"]+)') {
-                                            $phasePromptPrefixes["## $($Matches[1].Trim().Split(':')[0])"] = $phase
-                                        }
+                            $wfState = Get-Content $wfStateFile -Raw | ConvertFrom-Json -ErrorAction Stop
+                            if ($wfState.workflowName) { $wfName = $wfState.workflowName }
+                            if ($wfState.phases -and $wfState.workflowProgress) {
+                                $wfPhases = @($wfState.phases | ForEach-Object { $_.title })
+                                foreach ($ph in $wfPhases) { $phaseCounters[$ph] = 0; $phaseDone[$ph] = 0 }
+                                foreach ($wp in $wfState.workflowProgress) {
+                                    if ($wp.type -ne 'workflow_agent') { continue }
+                                    if ($wp.phaseTitle -and $phaseCounters.ContainsKey($wp.phaseTitle)) {
+                                        $phaseCounters[$wp.phaseTitle]++
+                                        if ($wp.state -eq 'done') { $phaseDone[$wp.phaseTitle]++ }
                                     }
                                 }
-                            }
-                            # Handle agents without explicit phase: by tracking phase() calls
-                            # Match agent() calls with inline string prompts following a phase("X") call
-                            $phaseRe = [regex]'(?s)phase\("([^"]+)"\)(.*?)(?=phase\("|$)'
-                            foreach ($pm in $phaseRe.Matches($scriptContent)) {
-                                $curPhase = $pm.Groups[1].Value
-                                $block = $pm.Groups[2].Value
-                                $inlineRe = [regex]'agent\(\s*\n?\s*"(##\s+[^"\\]{3,40}|[A-Z][a-z]+ this [a-z]+)'
-                                foreach ($im in $inlineRe.Matches($block)) {
-                                    if ($im.Value -match 'phase\s*:') { continue }
-                                    $prefix = $im.Groups[1].Value.Trim()
-                                    if (-not $phasePromptPrefixes.ContainsKey($prefix)) {
-                                        $phasePromptPrefixes[$prefix] = $curPhase
-                                    }
-                                }
+                                $_phasesResolved = $true
                             }
                         } catch {}
                     }
-                    $phaseCounters = @{}
-                    $phaseDone = @{}
-                    foreach ($ph in $wfPhases) { $phaseCounters[$ph] = 0; $phaseDone[$ph] = 0 }
+                    if (-not $_phasesResolved) {
+                        # Running workflow: parse meta.phases from script, infer agent-to-phase mapping from journal
+                        $wfScript = Get-ChildItem "$scriptDir/*-${wfId}.js" -ErrorAction SilentlyContinue | Select-Object -First 1
+                        if ($wfScript) {
+                            try {
+                                $scriptText = Get-Content $wfScript -Raw
+                                if ($scriptText -match '(?s)phases\s*:\s*\[(.*?)\]') {
+                                    $pBlock = $Matches[1] -replace "(\w+)\s*:" , '"$1":' -replace "'", '"'
+                                    $pArr = "[$pBlock]" | ConvertFrom-Json -ErrorAction Stop
+                                    $wfPhases = @($pArr | ForEach-Object { $_.title })
+                                    foreach ($ph in $wfPhases) { $phaseCounters[$ph] = 0; $phaseDone[$ph] = 0 }
+                                }
+                            } catch {}
+                        }
+                        if ($wfPhases.Count -gt 0) {
+                            $journalFile = "$($wfFolder.FullName)/journal.jsonl"
+                            if (Test-Path $journalFile) {
+                                try {
+                                    # Journal pattern: starts arrive in bursts per phase, results interleave.
+                                    # Detect phase boundaries: a "started" after a "result" begins a new phase.
+                                    $phaseIdx = 0
+                                    $seenResult = $false
+                                    $agentPhase = @{}
+                                    $doneAgents = [System.Collections.Generic.HashSet[string]]::new()
+                                    foreach ($jline in [System.IO.File]::ReadLines($journalFile)) {
+                                        try {
+                                            $je = $jline | ConvertFrom-Json -ErrorAction Stop
+                                            if ($je.type -eq 'started') {
+                                                if ($seenResult -and $phaseIdx -lt ($wfPhases.Count - 1)) {
+                                                    $phaseIdx++
+                                                    $seenResult = $false
+                                                }
+                                                $agentPhase[$je.agentId] = $wfPhases[$phaseIdx]
+                                                $phaseCounters[$wfPhases[$phaseIdx]]++
+                                            } elseif ($je.type -eq 'result') {
+                                                $seenResult = $true
+                                                if ($je.agentId) { $null = $doneAgents.Add($je.agentId) }
+                                            }
+                                        } catch { continue }
+                                    }
+                                    foreach ($ph in $wfPhases) { $phaseDone[$ph] = 0 }
+                                    foreach ($aid in $doneAgents) {
+                                        if ($agentPhase.ContainsKey($aid) -and $phaseDone.ContainsKey($agentPhase[$aid])) {
+                                            $phaseDone[$agentPhase[$aid]]++
+                                        }
+                                    }
+                                } catch {}
+                            }
+                        }
+                    }
 
                     $wfTotalTok = 0; $wfFirstTs = $null; $wfLastWrite = 0; $wfSubCount = 0; $wfModel = ""
                     foreach ($wjf in Get-ChildItem "$($wfFolder.FullName)/agent-*.jsonl" -ErrorAction SilentlyContinue) {
@@ -532,18 +553,13 @@ if ($doFullCompute) {
                             if ($ca.first_ts -and [int64]$ca.first_ts -gt 0 -and (-not $wfFirstTs -or [int64]$ca.first_ts -lt $wfFirstTs)) {
                                 $wfFirstTs = [int64]$ca.first_ts
                             }
-                            if ($ca.phase -and $phaseCounters.ContainsKey($ca.phase)) {
-                                $phaseCounters[$ca.phase]++
-                                if ($ca.done) { $phaseDone[$ca.phase]++ }
-                            }
                         } else {
                             $seekPos = if ($wjfSize -gt $caSize -and $caSize -gt 0) { $caSize } else { 0 }
                             $subTok = if ($seekPos -gt 0) { [int]$ca.tokens } else { 0 }
-                            $subFirstTs = $null; $subModel = ""; $subPhase = ""; $subDone = $false
+                            $subFirstTs = $null; $subModel = ""
                             if ($seekPos -gt 0) {
                                 $subModel = if ($ca.model) { $ca.model } else { "" }
                                 if ($ca.first_ts -and [int64]$ca.first_ts -gt 0) { $subFirstTs = [int64]$ca.first_ts }
-                                $subPhase = if ($ca.phase) { $ca.phase } else { "" }
                             }
 
                             try {
@@ -554,52 +570,31 @@ if ($doFullCompute) {
                                         $null = $fs.Seek($seekPos, 'Begin')
                                         $reader.DiscardBufferedData()
                                     }
-                                    $lineNum = 0
                                     while ($null -ne ($line = $reader.ReadLine())) {
                                         try {
                                             $entry = $line | ConvertFrom-Json -ErrorAction Stop
                                             if (-not $subFirstTs -and $entry.timestamp) {
                                                 $subFirstTs = [DateTimeOffset]::new([DateTime]::Parse($entry.timestamp), [TimeSpan]::Zero).ToUnixTimeSeconds()
                                             }
-                                            # Classify phase from first user message
-                                            if ($lineNum -eq 0 -and $seekPos -eq 0 -and -not $subPhase -and $entry.message.role -eq 'user' -and $entry.message.content) {
-                                                $content = $entry.message.content
-                                                foreach ($prefix in $phasePromptPrefixes.Keys) {
-                                                    if ($content.StartsWith($prefix)) {
-                                                        $subPhase = $phasePromptPrefixes[$prefix]
-                                                        break
-                                                    }
-                                                }
-                                            }
                                             if ($entry.message.usage.output_tokens) {
                                                 $subTok += [int]$entry.message.usage.output_tokens
-                                                $subDone = $true
                                             }
                                             if (-not $subModel -and $entry.message.model) {
                                                 $subModel = $entry.message.model -replace '^claude-' -replace '-\d.*'
                                                 $subModel = (Get-Culture).TextInfo.ToTitleCase($subModel)
                                             }
                                         } catch { continue }
-                                        $lineNum++
                                     }
                                 } finally { $fs.Dispose() }
                             } catch {}
 
-                            # For files unchanged since last cache, completion detection via staleness
-                            if (-not $subDone -and $subTok -gt 0 -and ($now - $wjfWrite) -gt 30) { $subDone = $true }
-
                             $atc[$ck] = @{
                                 size = $wjfSize; tokens = $subTok; model = $subModel
                                 first_ts = if ($subFirstTs) { $subFirstTs } else { 0 }
-                                phase = $subPhase; done = $subDone
                             }
                             $wfTotalTok += $subTok
                             if (-not $wfModel -and $subModel) { $wfModel = $subModel }
                             if ($subFirstTs -and (-not $wfFirstTs -or $subFirstTs -lt $wfFirstTs)) { $wfFirstTs = $subFirstTs }
-                            if ($subPhase -and $phaseCounters.ContainsKey($subPhase)) {
-                                $phaseCounters[$subPhase]++
-                                if ($subDone) { $phaseDone[$subPhase]++ }
-                            }
                         }
                     }
 
@@ -614,15 +609,11 @@ if ($doFullCompute) {
                         }
                     }
 
-                    # Build phase breakdown if we successfully parsed phases and classified >50% of agents
                     $wfPhaseData = @()
                     if ($wfPhases.Count -gt 0) {
-                        $classified = ($phaseCounters.Values | Measure-Object -Sum).Sum
-                        if ($classified -gt ($wfSubCount / 2)) {
-                            foreach ($ph in $wfPhases) {
-                                $wfPhaseData += [PSCustomObject]@{
-                                    Title = $ph; Done = $phaseDone[$ph]; Total = $phaseCounters[$ph]
-                                }
+                        foreach ($ph in $wfPhases) {
+                            $wfPhaseData += [PSCustomObject]@{
+                                Title = $ph; Done = $phaseDone[$ph]; Total = $phaseCounters[$ph]
                             }
                         }
                     }
