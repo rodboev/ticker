@@ -491,11 +491,12 @@ if ($doFullCompute) {
                             try {
                                 $scriptText = Get-Content $wfScript -Raw
                                 if ($scriptText -match '(?s)phases\s*:\s*\[(.*?)\]') {
-                                    $pBlock = $Matches[1] -replace "(\w+)\s*:" , '"$1":' -replace "'", '"'
-                                    $pArr = "[$pBlock]" | ConvertFrom-Json -ErrorAction Stop
-                                    $wfPhases = @($pArr | ForEach-Object { $_.title })
-                                    foreach ($ph in $wfPhases) { $phaseCounters[$ph] = 0; $phaseDone[$ph] = 0 }
+                                    $titleRe = [regex]"title\s*:\s*'([^']+)'"
+                                    foreach ($tm in $titleRe.Matches($Matches[1])) {
+                                        $wfPhases += $tm.Groups[1].Value
+                                    }
                                 }
+                                foreach ($ph in $wfPhases) { $phaseCounters[$ph] = 0; $phaseDone[$ph] = 0 }
                             } catch {}
                         }
                         if ($wfPhases.Count -gt 0) {
