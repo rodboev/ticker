@@ -30,10 +30,11 @@ Full compute (transcript parsing, git branch, agent scanning) runs every `$FULL_
 2. **Project** — folder emoji, project name, git branch or "(untracked)"
 3. **CWD** — relative path if different from project root
 4. **Diff** — `+N/-M` lines added/removed
-5. **Context** — token count, progress bar, percentage
-6. **5h rate** — progress bar, percentage, optional rate-of-change `(↑N%/hr)`
-7. **7d rate** — progress bar, percentage
-8. **Cache** — countdown timer (`cache 4m5s` or collapsed `-4m5s`)
+5. **Shell** — hourglass + elapsed time + description for in-flight Bash/PowerShell commands (`⏳ 45s Install deps`), shown only after 3s
+6. **Context** — token count, progress bar, percentage
+7. **5h rate** — progress bar, percentage, optional rate-of-change `(↑N%/hr)`
+8. **7d rate** — progress bar, percentage
+9. **Cache** — countdown timer (`cache 4m5s` or collapsed `-4m5s`)
 
 ### Collapse cascade
 
@@ -42,17 +43,26 @@ When the rendered line exceeds `$WIDTH - 4`, steps fire in order until it fits. 
 | Step | What | Saves |
 |------|------|-------|
 | 1 | `cache 4m5s` -> `4m5s` | 6 chars |
-| 2 | ` [1M]` removed from model | 5 chars |
-| 3-6 | Bars squeeze 8->7->6->5->4 | ~3 chars/step (1 per visible bar) |
-| 7 | 5h rate string `(↑N%/hr)` dropped | ~10 chars |
-| 8 | 7d bar -> text-only `7d: N%` | ~8 chars |
-| 9 | 7d removed entirely | ~10 chars |
-| 10 | 5h bar -> text-only `5h: N%` | ~8 chars |
-| 11 | 5h removed entirely | ~10 chars |
+| 2 | Shell description dropped, timer only | ~20 chars |
+| 3 | ` [1M]` removed from model | 5 chars |
+| 4-7 | Bars squeeze 8->7->6->5->4 | ~3 chars/step (1 per visible bar) |
+| 8 | 5h rate string `(↑N%/hr)` dropped | ~10 chars |
+| 9 | 7d bar -> text-only `7d: N%` | ~8 chars |
+| 10 | 7d removed entirely | ~10 chars |
+| 11 | 5h bar -> text-only `5h: N%` | ~8 chars |
+| 12 | 5h removed entirely | ~10 chars |
 
 When collapsed, only the countdown is shown with no prefix. Bars squeeze by 1 char at a time (recovering ~3 chars per step across all visible bars) down to minimum width 4 (half of the default 8).
 
 The `rebuildBars` function preserves existing collapse state via `$script:rateDropped` so squeezing bars doesn't re-attach a previously dropped rate string.
+
+### Active repo detection
+
+When `project_dir` is not a git repo (or the transcript shows work in a different repo), the statusline overrides the project name and branch. During the 64KB cache scan, it captures the most recent transcript entry whose `cwd` differs from `project_dir` and has a non-empty `gitBranch`. These values (`$activeDir`, `$activeBranch`) are stored in the compute cache. At display time, if the active repo differs from `project_dir` (or `project_dir` has no git branch), the active repo's leaf name and branch replace the defaults. When the 64KB tail no longer contains diverging entries, the override clears and normal behavior resumes.
+
+### Terminal title
+
+The script emits an OSC escape sequence (`ESC]0;...BEL`) before each render to set the terminal title bar to `spinner project | sid` (first 8 chars of session ID). When idle, the spinner shows `✦`. When running (shell or agents active), it cycles through braille frames (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`) using `Floor($now / $REFRESH_INTERVAL) % frameCount`, advancing one frame per refresh with no state file. The OSC sequence is written as a separate `[Console]::Write` call so `visLen` never sees it. The test harness strips OSC sequences via `$oscRe`.
 
 ### Cache timer format
 
@@ -65,6 +75,14 @@ When Claude Code doesn't provide `rate_limits` in the JSON, the script fetches f
 ### Rate-of-change tracking
 
 5h usage samples are recorded to `.statusline_rate_history` at most once per `$OAUTH_TTL` (60s). The `calcRate` function computes percentage-per-hour over the last 30 minutes, requiring at least 2 minutes of data.
+
+### Shell timer
+
+Detects in-flight Bash/PowerShell tool calls by scanning the last 16KB of the transcript. If the last entry with a `message.role` is an `assistant` with a `tool_use` for Bash or PowerShell (no subsequent `tool_result`), the shell epoch and description are cached. The elapsed timer updates every tick since it's computed from `$now - $shellEpoch`. Only shown after 3 seconds of runtime. Description is truncated to 30 characters in the collapse cascade.
+
+### Agent line wrapping
+
+When the regular agents line exceeds `$MAX_W`, individual agent entries wrap to subsequent lines. The header (`N agents (Model):`) appears on the first line, and continuation lines are indented to align with the first agent entry. Each line respects `$MAX_W`.
 
 ### Agent tracking
 
@@ -113,6 +131,6 @@ Note: the bash `vis_len` function uses sed to replace known multi-byte character
 
 ## Parity: statusline.sh
 
-The Bash implementation is behind the PowerShell version. Both have: no-leading-zero cache timer, full collapse cascade, proportional bar squeezing, workflow detection with 120s recency filter. PowerShell-only: workflow phase breakdown.
+The Bash implementation is behind the PowerShell version. Both have: no-leading-zero cache timer, full collapse cascade, proportional bar squeezing, workflow detection with 120s recency filter. PowerShell-only: workflow phase breakdown, shell timer, agent line wrapping.
 
 Only backport changes to the Bash version when explicitly asked.

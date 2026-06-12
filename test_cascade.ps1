@@ -7,7 +7,8 @@ $ErrorActionPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 $ansiRe = [regex]'\x1b\[[0-9;]*m'
-function strip($s) { $ansiRe.Replace($s, '') }
+$oscRe  = [regex]'\x1b\]0;[^\x07]*\x07'
+function strip($s) { $oscRe.Replace($ansiRe.Replace($s, ''), '') }
 
 $claudeDir = "$env:USERPROFILE\.claude"
 $scriptPath = "$PSScriptRoot\statusline.ps1"

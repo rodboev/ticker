@@ -8,10 +8,12 @@ $ErrorActionPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 # ── Tuning constants ────────────────────────────────────
-$WIDTH            = 120     # terminal width (default 120)
+$WIDTH            = 106     # terminal width (default 120)
 $OAUTH_TTL        = 60      # seconds between OAuth usage API calls
 $FULL_INTERVAL    = 10      # seconds between full recomputes (no agents)
 $AGENT_INTERVAL   = 5       # seconds between full recomputes (agents active)
+$REFRESH_INTERVAL = 3       # match statusLine.refreshInterval in settings.json
+$SHOW_RESUME_LINE = $false  # add a resume command line below the main row
 
 $rawInput = [Console]::In.ReadToEnd()
 if (-not $rawInput) { exit 0 }
@@ -108,6 +110,11 @@ function writeComputeCache {
         in_git       = $inGit
         cache_epoch  = $cacheEpoch
         cache_ttl    = $cacheTtl
+        shell_epoch  = $shellEpoch
+        shell_desc   = $shellDesc
+        shell_count  = $shellCount
+        active_dir     = $activeDir
+        active_branch  = $activeBranch
         agents       = @($agentsData | ForEach-Object {
             $entry = [ordered]@{ Short = $_.Short; Tokens = $_.Tokens; Rate = $_.Rate; Model = $_.Model
                         Workflow = $_.Workflow; SubCount = $_.SubCount }
@@ -135,10 +142,11 @@ $sevenD     = $d.rate_limits.seven_day.used_percentage
 $claudeDir = "$env:USERPROFILE\.claude"
 $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
 $sessionId = if ($transcript) { [System.IO.Path]::GetFileNameWithoutExtension($transcript) } else { "" }
+$resumeSessionId = if ($d.session_id) { $d.session_id } else { $sessionId }
 
 # ── Resolve this session's PID from session files ────────
 $myPid = 0
-$_targetSid = if ($d.session_id) { $d.session_id } else { $sessionId }
+$_targetSid = $resumeSessionId
 if ($_targetSid) {
     foreach ($sf in Get-ChildItem "$claudeDir\sessions\*.json" -ErrorAction SilentlyContinue) {
         try {
@@ -288,12 +296,19 @@ if ($doFullCompute) {
 
     # Seed defaults for expensive fields; read stale cache if available
     $cacheEpoch = 0; $cacheTtl = 300; $branch = ""; $inGit = $false; $agentsData = @()
+    $shellEpoch = 0; $shellDesc = ""; $shellCount = 0
+    $activeDir = ""; $activeBranch = ""
     if ($cc) {
         $branch = if ($cc.branch) { $cc.branch } else { "" }
         $inGit = [bool]$cc.in_git
         $cacheEpoch = if ($cc.cache_epoch) { [int64]$cc.cache_epoch } else { 0 }
         $cacheTtl = if ($cc.cache_ttl) { [int]$cc.cache_ttl } else { 300 }
         if ($cc.agents) { $agentsData = parseAgentsCache $cc.agents }
+        $shellEpoch = if ($cc.shell_epoch) { [int64]$cc.shell_epoch } else { 0 }
+        $shellDesc = if ($cc.shell_desc) { $cc.shell_desc } else { "" }
+        $shellCount = if ($cc.shell_count) { [int]$cc.shell_count } else { 0 }
+        $activeDir = if ($cc.active_dir) { $cc.active_dir } else { "" }
+        $activeBranch = if ($cc.active_branch) { $cc.active_branch } else { "" }
     }
 
     # Write partial cache immediately -- breaks the death loop
@@ -322,6 +337,11 @@ if ($doFullCompute) {
                 for ($i = $lines.Count - 1; $i -ge 0; $i--) {
                     try {
                         $entry = $lines[$i] | ConvertFrom-Json -ErrorAction Stop
+                        if (-not $activeDir -and $entry.gitBranch -and $entry.cwd -and
+                            $entry.cwd -ne $projectDir) {
+                            $activeDir    = $entry.cwd
+                            $activeBranch = $entry.gitBranch
+                        }
                         $usage = $entry.message.usage
                         if ($null -eq $usage) { continue }
                         $hasCache = (($usage.cache_read_input_tokens -gt 0) -or
@@ -347,10 +367,64 @@ if ($doFullCompute) {
         }
     }
 
+    # ── In-flight shell detection ────────────────────────
+    # Parallel tool calls produce: assistant [tool_use A, tool_use B], then
+    # user [tool_result A] arrives while B is still running. Scan backward
+    # collecting completed tool_result IDs until we hit the assistant message,
+    # then check which shell tool_uses have no matching result.
+    $shellEpoch = 0; $shellDesc = ""; $shellCount = 0
+    if ($transcript -and (Test-Path $transcript)) {
+        try {
+            $fs = [System.IO.File]::Open($transcript, 'Open', 'Read', 'ReadWrite')
+            try {
+                $tailBytes = [math]::Min($fs.Length, 16384)
+                $null = $fs.Seek(-$tailBytes, 'End')
+                $reader = [System.IO.StreamReader]::new($fs, [System.Text.Encoding]::UTF8)
+                $null = $reader.ReadLine()
+                $tailLines = @()
+                while ($null -ne ($tl = $reader.ReadLine())) { $tailLines += $tl }
+            } finally { $fs.Dispose() }
+
+            $completedIds = [System.Collections.Generic.HashSet[string]]::new()
+            for ($i = $tailLines.Count - 1; $i -ge 0; $i--) {
+                try {
+                    $entry = $tailLines[$i] | ConvertFrom-Json -ErrorAction Stop
+                    if (-not $entry.message.role) { continue }
+                    if ($entry.message.role -eq 'user' -and $entry.message.content) {
+                        foreach ($block in $entry.message.content) {
+                            if ($block.type -eq 'tool_result' -and $block.tool_use_id) {
+                                $null = $completedIds.Add($block.tool_use_id)
+                            }
+                        }
+                        continue
+                    }
+                    if ($entry.message.role -eq 'assistant' -and $entry.message.content) {
+                        $entryTs = [DateTimeOffset]::new([DateTime]::Parse($entry.timestamp), [TimeSpan]::Zero).ToUnixTimeSeconds()
+                        foreach ($block in $entry.message.content) {
+                            if ($block.type -eq 'tool_use' -and $block.name -match '^(Bash|PowerShell)$' -and
+                                -not $completedIds.Contains($block.id)) {
+                                $shellCount++
+                                if ($shellEpoch -eq 0 -or $entryTs -lt $shellEpoch) {
+                                    $shellEpoch = $entryTs
+                                    $shellDesc = if ($block.input.description) { $block.input.description } else { "" }
+                                }
+                            }
+                        }
+                        break
+                    }
+                } catch { continue }
+            }
+        } catch {}
+    }
+
     # ── Git branch ───────────────────────────────────────
     if ($projectDir) {
         $branch = git -C $projectDir rev-parse --abbrev-ref HEAD 2>$null
         if ($branch) { $inGit = $true } else { $branch = ""; $inGit = $false }
+    }
+    if ($activeBranch -and $activeDir -and (-not $inGit -or $activeDir -ne $projectDir)) {
+        $branch = $activeBranch
+        $inGit  = $true
     }
 
     # ── Active agents (incremental parsing) ────────────
@@ -646,6 +720,11 @@ if ($doFullCompute) {
     $inGit      = [bool]$cc.in_git
     $cacheEpoch = [int64]$cc.cache_epoch
     $cacheTtl   = [int]$cc.cache_ttl
+    $shellEpoch = if ($cc.shell_epoch) { [int64]$cc.shell_epoch } else { 0 }
+    $shellDesc  = if ($cc.shell_desc) { $cc.shell_desc } else { "" }
+    $shellCount = if ($cc.shell_count) { [int]$cc.shell_count } else { 0 }
+    $activeDir    = if ($cc.active_dir)    { $cc.active_dir }    else { "" }
+    $activeBranch = if ($cc.active_branch) { $cc.active_branch } else { "" }
     $agentsData = if ($cc.agents) { parseAgentsCache $cc.agents } else { @() }
 }
 
@@ -673,7 +752,8 @@ if ($model) {
     $segments['model'] = $s
 }
 
-$proj = if ($projectDir) { Split-Path $projectDir -Leaf } else { "" }
+$displayDir = if ($activeBranch -and $activeDir) { $activeDir } else { $projectDir }
+$proj = if ($displayDir) { Split-Path $displayDir -Leaf } else { "" }
 if ($proj) {
     if ($inGit) {
         $segments['project'] = "${cProj}`u{1F4C1} ${proj} ${cGray}(${branch})"
@@ -684,6 +764,22 @@ if ($proj) {
 
 if ($inGit -and ($linesAdd -gt 0 -or $linesDel -gt 0)) {
     $segments['diff'] = "${cAdd}+${linesAdd}${cDel}/-${linesDel}"
+}
+
+$cShell = fg 180 160 255
+$shellElapsed = ""
+if ($shellEpoch -gt 0 -and $shellCount -gt 0) {
+    $shellSec = $now - $shellEpoch
+    if ($shellSec -ge 3) {
+        $sm = [math]::Floor($shellSec / 60)
+        $ss = $shellSec % 60
+        $shellElapsed = if ($sm -gt 0) { "${sm}m${ss}s" } else { "${ss}s" }
+        $descTrunc = if ($shellDesc.Length -gt 30) { $shellDesc.Substring(0, 27) + "..." } else { $shellDesc }
+        $shellSeg = "${cShell}`u{23F3} ${shellElapsed}"
+        if ($shellCount -gt 1) { $shellSeg += " ${cDim}`u{00D7}${shellCount}" }
+        if ($descTrunc) { $shellSeg += " ${cDim}${descTrunc}" }
+        $segments['shell'] = $shellSeg
+    }
 }
 
 $ctxP = [math]::Round($ctxPct)
@@ -740,6 +836,11 @@ $collapseSteps = @(
     { if ($segments.Contains('cache') -and $cacheRemaining) {
         $segments['cache'] = "$(tierColor $cacheElapsedPct @(30,60,80))${cacheRemaining}"
     } }
+    { if ($segments.Contains('shell') -and $shellDesc) {
+        $s = "${cShell}`u{23F3} ${shellElapsed}"
+        if ($shellCount -gt 1) { $s += " ${cDim}`u{00D7}${shellCount}" }
+        $segments['shell'] = $s
+    } }
     { if ($segments.Contains('model') -and $ctxSize -ge 1000000) {
         $ms = "${cModel}$($model -replace '\s*\(1M context\)', '')"
         if ($effort) { $ms += " ${cGray}(${effort})" }
@@ -767,6 +868,22 @@ foreach ($step in $collapseSteps) {
 
 $out = $segments.Values -join $sep
 
+$resumeLine = ""
+if ($SHOW_RESUME_LINE -and $resumeSessionId) {
+    $resumePart = "claude --resume $resumeSessionId"
+    if ($projectDir) {
+        $isWindowsPath = $projectDir -match '^[A-Z]:\\'
+        if ($isWindowsPath) {
+            $resumeLine = "cmd /c `"cd /d $projectDir && $resumePart`""
+        } else {
+            $quote = if ($projectDir.Contains(' ')) { '"' } else { '' }
+            $resumeLine = "cd $quote$projectDir$quote && $resumePart"
+        }
+    } else {
+        $resumeLine = $resumePart
+    }
+}
+
 # ── Agents line ──────────────────────────────────────────
 $agentsLine = ""
 $workflowLines = @()
@@ -779,8 +896,9 @@ if ($agentsData.Count -gt 0) {
         $pl = if ($regularAgents.Count -gt 1) { "s" } else { "" }
         $mdl = if ($allSame -and $regularAgents[0].Model) { " ${cDim}($($regularAgents[0].Model))" } else { "" }
         $header = "${cGray}$($regularAgents.Count) agent${pl}${mdl}${cDim}:"
+        $comma = "${cGray},"
 
-        $parts = foreach ($a in $regularAgents) {
+        $parts = @(foreach ($a in $regularAgents) {
             $tf = fmtTok $a.Tokens
             $segs = @("${cGray}$($a.Short)", "${cModel}${tf}")
             if ($null -ne $a.Rate -and $a.Rate -ne 0) {
@@ -789,8 +907,27 @@ if ($agentsData.Count -gt 0) {
             }
             if (-not $allSame -and $a.Model) { $segs += "${cDim}($($a.Model))" }
             " " + ($segs -join ' ')
+        })
+
+        $singleLine = $header + ($parts -join $comma)
+        if ((visLen $singleLine) -le $MAX_W) {
+            $agentsLine = $singleLine
+        } else {
+            $indent = " " * (visLen $header)
+            $curLine = $header + $parts[0]
+            $agentLines = @()
+            for ($i = 1; $i -lt $parts.Count; $i++) {
+                $candidate = $curLine + $comma + $parts[$i]
+                if ((visLen $candidate) -le $MAX_W) {
+                    $curLine = $candidate
+                } else {
+                    $agentLines += $curLine + $comma
+                    $curLine = $indent + $parts[$i]
+                }
+            }
+            $agentLines += $curLine
+            $agentsLine = $agentLines -join "`n"
         }
-        $agentsLine = $header + ($parts -join "${cGray},")
     }
 
     foreach ($wf in $workflows) {
@@ -818,7 +955,16 @@ if ($agentsData.Count -gt 0) {
 }
 
 # ── Output ───────────────────────────────────────────────
+$shortSid = if ($resumeSessionId.Length -ge 8) { $resumeSessionId.Substring(0, 8) } else { $resumeSessionId }
+$titleProj = if ($proj) { $proj } else { "claude" }
+$spinnerFrames = @('⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏')
+$isRunning = ($shellCount -gt 0) -or ($agentsData.Count -gt 0)
+$spinnerChar = if ($isRunning) {
+    $spinnerFrames[[math]::Floor($now / $REFRESH_INTERVAL) % $spinnerFrames.Count]
+} else { '✦' }
+[Console]::Write("$e]0;${spinnerChar} ${titleProj} | ${shortSid}$([char]7)")
 [Console]::Write("$out$rst")
+if ($resumeLine) { [Console]::Write("`n${cDim}$resumeLine$rst") }
 if ($agentsLine) { [Console]::Write("`n$agentsLine$rst") }
 foreach ($wl in $workflowLines) { [Console]::Write("`n$wl$rst") }
 exit 0
