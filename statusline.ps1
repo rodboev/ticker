@@ -786,6 +786,7 @@ $ctxP = [math]::Round($ctxPct)
 $ctxUsed = [math]::Round($ctxSize * $ctxPct / 100)
 $uFmt = fmtTok $ctxUsed
 $segments['ctx'] = "${cGray}${uFmt} $(makeBar $ctxPct) $(tierColor $ctxPct @(30,60,80))${ctxP}%"
+$segCtxShort    = "${cGray}${uFmt} $(tierColor $ctxPct @(30,60,80))${ctxP}%"
 
 if ($null -ne $fiveH) {
     $p5 = [math]::Round($fiveH)
@@ -855,9 +856,13 @@ $collapseSteps = @(
         $p5_ = [math]::Round($fiveH)
         $segments['5h'] = "${cGray}5h $(makeBar $fiveH $script:curBarW) $(tierColor $fiveH @(30,60,80))${p5_}%"
     } }
-    { if ($seg7dShort -and $segments.Contains('7d')) { $segments['7d'] = $seg7dShort } }
+    { # bars -> text-only for all three segments at once
+        $changed = $false
+        if ($segCtxShort -and $segments.Contains('ctx')) { $segments['ctx'] = $segCtxShort; $changed = $true }
+        if ($seg7dShort -and $segments.Contains('7d'))   { $segments['7d'] = $seg7dShort; $changed = $true }
+        if ($seg5hShort -and $segments.Contains('5h'))   { $segments['5h'] = $seg5hShort; $changed = $true }
+    }
     { if ($segments.Contains('7d')) { $segments.Remove('7d') } }
-    { if ($seg5hShort -and $segments.Contains('5h')) { $segments['5h'] = $seg5hShort } }
     { if ($segments.Contains('5h')) { $segments.Remove('5h') } }
 )
 

@@ -47,12 +47,11 @@ When the rendered line exceeds `$WIDTH - 4`, steps fire in order until it fits. 
 | 3 | ` [1M]` removed from model | 5 chars |
 | 4-7 | Bars squeeze 8->7->6->5->4 | ~3 chars/step (1 per visible bar) |
 | 8 | 5h rate string `(↑N%/hr)` dropped | ~10 chars |
-| 9 | 7d bar -> text-only `7d: N%` | ~8 chars |
+| 9 | All bars (ctx, 5h, 7d) -> text-only | ~20 chars |
 | 10 | 7d removed entirely | ~10 chars |
-| 11 | 5h bar -> text-only `5h: N%` | ~8 chars |
-| 12 | 5h removed entirely | ~10 chars |
+| 11 | 5h removed entirely | ~10 chars |
 
-When collapsed, only the countdown is shown with no prefix. Bars squeeze by 1 char at a time (recovering ~3 chars per step across all visible bars) down to minimum width 4 (half of the default 8).
+When collapsed, only the countdown is shown with no prefix. Bars squeeze by 1 char at a time (recovering ~3 chars per step across all visible bars) down to minimum width 4 (half of the default 8). After squeezing, all three bars (ctx, 5h, 7d) convert to text-only in a single step before any segment is removed entirely.
 
 The `rebuildBars` function preserves existing collapse state via `$script:rateDropped` so squeezing bars doesn't re-attach a previously dropped rate string.
 
