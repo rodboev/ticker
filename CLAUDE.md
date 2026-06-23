@@ -14,6 +14,7 @@ Custom Claude Code status bar rendered by a hook in `~/.claude/settings.json`:
 - `statusline.ps1` — PowerShell 7 implementation (primary, Windows)
 - `statusline.sh` — Bash implementation (secondary, not kept in sync; see Parity section)
 - `test_cascade.ps1` — test harness for collapse cascade and timer formatting
+- `sl_test.ps1` — additional test harness
 - `statusline.png` — reference screenshot
 
 ## Architecture
@@ -28,13 +29,12 @@ Full compute (transcript parsing, git branch, agent scanning) runs every `$FULL_
 
 1. **Model** — display name, optional `[1M]` marker for 1M context, effort level
 2. **Project** — folder emoji, project name, git branch or "(untracked)"
-3. **CWD** — relative path if different from project root
-4. **Diff** — `+N/-M` lines added/removed
-5. **Shell** — hourglass + elapsed time + description for in-flight Bash/PowerShell commands (`⏳ 45s Install deps`), shown only after 3s
-6. **Context** — token count, progress bar, percentage
-7. **5h rate** — progress bar, percentage, optional rate-of-change `(↑N%/hr)`
-8. **7d rate** — progress bar, percentage
-9. **Cache** — countdown timer (`cache 4m5s` or collapsed `-4m5s`)
+3. **Diff** — `+N/-M` lines added/removed (only when in git)
+4. **Shell** — hourglass + elapsed time + description for in-flight Bash/PowerShell commands (`⏳ 45s Install deps`), shown only after 3s; multiplier shown for parallel calls (`×2`)
+5. **Context** — token count, progress bar, percentage
+6. **5h rate** — progress bar, percentage, optional rate-of-change `(↑N%/hr)`
+7. **7d rate** — progress bar, percentage
+8. **Cache** — countdown timer (`cache 4m5s` or collapsed `-4m5s`)
 
 ### Collapse cascade
 
@@ -57,7 +57,7 @@ The `rebuildBars` function preserves existing collapse state via `$script:rateDr
 
 ### Active repo detection
 
-When `project_dir` is not a git repo (or the transcript shows work in a different repo), the statusline overrides the project name and branch. During the 64KB cache scan, it captures the most recent transcript entry whose `cwd` differs from `project_dir` and has a non-empty `gitBranch`. These values (`$activeDir`, `$activeBranch`) are stored in the compute cache. At display time, if the active repo differs from `project_dir` (or `project_dir` has no git branch), the active repo's leaf name and branch replace the defaults. When the 64KB tail no longer contains diverging entries, the override clears and normal behavior resumes.
+When `project_dir` is not a git repo (or the transcript shows work in a different repo), the statusline overrides the project name and branch. During the 64KB tail scan, it captures the most recent transcript entry whose `cwd` differs from `project_dir` and has a non-empty `gitBranch`. These values (`$activeDir`, `$activeBranch`) are stored in the compute cache. At display time, if the active repo differs from `project_dir` (or `project_dir` has no git branch), the active repo's leaf name and branch replace the defaults. When the 64KB tail no longer contains diverging entries, the override clears and normal behavior resumes.
 
 ### Terminal title
 
@@ -69,7 +69,7 @@ No leading zeros on seconds: `4m5s`, `55m4s`, `5m0s` (not `4m05s`, `55m04s`).
 
 ### OAuth usage
 
-When Claude Code doesn't provide `rate_limits` in the JSON, the script fetches from `https://api.anthropic.com/api/oauth/usage` using the token from `.credentials.json`. Only one session owns the fetch (lock file `.sl_oauth_owner`), and it runs as a background job to avoid blocking rendering.
+When Claude Code doesn't provide `rate_limits` in the JSON (common when using an API key, even through a proxy), the script fetches from `https://api.anthropic.com/api/oauth/usage` using the token from `.credentials.json`. Only one session owns the fetch (lock file `.sl_oauth_owner`), throttled to one attempt per `$OAUTH_TTL` (60s). The fetch is synchronous (typically <200ms) since background jobs (`Start-Job`) die when the statusline process exits.
 
 ### Rate-of-change tracking
 
@@ -77,7 +77,7 @@ When Claude Code doesn't provide `rate_limits` in the JSON, the script fetches f
 
 ### Shell timer
 
-Detects in-flight Bash/PowerShell tool calls by scanning the last 16KB of the transcript. If the last entry with a `message.role` is an `assistant` with a `tool_use` for Bash or PowerShell (no subsequent `tool_result`), the shell epoch and description are cached. The elapsed timer updates every tick since it's computed from `$now - $shellEpoch`. Only shown after 3 seconds of runtime. Description is truncated to 30 characters in the collapse cascade.
+Detects in-flight Bash/PowerShell tool calls by scanning the last 16KB of the transcript. Handles parallel tool calls: scans backward collecting `tool_result` IDs until reaching the `assistant` message, then checks which shell `tool_use` entries have no matching result. The elapsed timer updates every tick since it's computed from `$now - $shellEpoch`. Only shown after 3 seconds of runtime. Description is truncated to 30 characters in the collapse cascade.
 
 ### Agent line wrapping
 
@@ -89,16 +89,20 @@ Regular agents are detected under `<transcript>/subagents/agent-*.meta.json` wit
 
 ### Workflow tracking
 
-Workflow subagents live under `<transcript>/subagents/workflows/wf_<id>/agent-*.jsonl`. The workflow name is resolved from `<transcript>/workflows/scripts/<name>-<wf_id>.js`. Tokens are aggregated across all sub-agents in the workflow. Each workflow renders as two lines: a one-liner summary and a phase breakdown:
+Workflow subagents live under `<transcript>/subagents/workflows/wf_<id>/agent-*.jsonl`. The workflow name is resolved from the state file (`<transcript>/workflows/<wfId>.json`) or the script file (`<transcript>/workflows/scripts/<name>-<wf_id>.js`). Tokens are aggregated across all sub-agents in the workflow. Each workflow renders as two lines: a one-liner summary and a phase breakdown:
 
 ```
 → deep-research (105 agents) 149k 12k/m (Sonnet)
    Scope 1/1 ✓  Search 5/5 ✓  Fetch 23/23 ✓  Verify 75/75 ✓  Synthesize 0/1
 ```
 
-Phase breakdown is derived by parsing `meta.phases` from the workflow script, then classifying each agent by matching its first user message against known prompt prefixes (e.g. `## Web Searcher` -> Search, `## Source Extractor` -> Fetch). Phase and completion state are cached per-agent in `.sl_agents_<sid>`. If >50% of agents can't be classified, the phase line is omitted and only the one-liner is shown.
+Phase breakdown uses two strategies: for completed/running workflows with a state file, it reads `workflowProgress` entries directly; for running workflows without state, it parses `meta.phases` from the script and infers agent-to-phase mapping from `journal.jsonl` (detecting phase boundaries when a "started" event follows a "result" event). Phase and completion state are cached per-agent in `.sl_agents_<sid>`. If all phases have zero agents, the phase line is omitted.
 
 The `Workflow`, `SubCount`, and `Phases` fields on agent data distinguish workflow entries from regular agents.
+
+### Resume line
+
+When `$SHOW_RESUME_LINE` is `$true` (default), a second line shows a copy-pasteable resume command: `cmd /c "cd /d <projectDir> && claude --resume <sessionId>"` (Windows paths) or `cd <projectDir> && claude --resume <sessionId>` (Unix paths).
 
 ### Per-session state files
 
@@ -114,8 +118,15 @@ All prefixed with `.sl_` in `~/.claude/`:
 | `.sl_last_gc` | Throttle for GC of stale session files |
 | `.sl_oauth_owner` | Lock file for OAuth fetch ownership |
 | `.sl_oauth_last_attempt` | Throttle for OAuth fetch attempts |
+| `.statusline_usage_cache` | Cached OAuth usage response (JSON) |
+| `.statusline_rate_history` | 5h usage samples for rate-of-change |
 
 GC runs at most every 5 minutes, removing `.sl_*` files for sessions whose PIDs are no longer running.
+
+## PowerShell gotchas
+
+- **`$pid` is read-only.** PowerShell reserves `$pid`, `$null`, `$true`, `$false`, `$args`, `$input`, `$this`, `$_`, `$PSItem`, `$Error`, `$Host`, `$Profile`, and other automatic variables. Function parameters must not shadow them; the assignment silently throws and the parameter stays at its type default. The `claimLock` function uses `$callerPid` for this reason.
+- **`Start-Job` dies with parent.** Background jobs are child threads of the pwsh process; when the statusline process exits (every render cycle), pending jobs are killed. Use synchronous calls gated behind throttle files, or `Start-Process` for truly detached work.
 
 ## Testing
 
@@ -130,6 +141,6 @@ Note: the bash `vis_len` function uses sed to replace known multi-byte character
 
 ## Parity: statusline.sh
 
-The Bash implementation is behind the PowerShell version. Both have: no-leading-zero cache timer, full collapse cascade, proportional bar squeezing, workflow detection with 120s recency filter. PowerShell-only: workflow phase breakdown, shell timer, agent line wrapping.
+The Bash implementation is behind the PowerShell version. Both have: no-leading-zero cache timer, full collapse cascade, proportional bar squeezing, workflow detection with 120s recency filter. PowerShell-only: workflow phase breakdown, shell timer, agent line wrapping, resume line.
 
 Only backport changes to the Bash version when explicitly asked.

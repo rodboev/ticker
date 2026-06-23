@@ -13,7 +13,7 @@ $OAUTH_TTL        = 60      # seconds between OAuth usage API calls
 $FULL_INTERVAL    = 10      # seconds between full recomputes (no agents)
 $AGENT_INTERVAL   = 5       # seconds between full recomputes (agents active)
 $REFRESH_INTERVAL = 3       # match statusLine.refreshInterval in settings.json
-$SHOW_RESUME_LINE = $false  # add a resume command line below the main row
+$SHOW_RESUME_LINE = $true  # add a resume command line below the main row
 
 $rawInput = [Console]::In.ReadToEnd()
 if (-not $rawInput) { exit 0 }
@@ -87,16 +87,16 @@ function parseAgentsCache($agents) {
     return $result
 }
 
-function claimLock([string]$lockFile, [int]$pid) {
-    if ($pid -le 0) { return $false }
+function claimLock([string]$lockFile, [int]$callerPid) {
+    if ($callerPid -le 0) { return $false }
     if (Test-Path $lockFile) {
         try {
             $owner = [int](Get-Content $lockFile -Raw).Trim()
-            if ($owner -eq $pid) { return $true }
+            if ($owner -eq $callerPid) { return $true }
             if (Get-Process -Id $owner -ErrorAction SilentlyContinue) { return $false }
         } catch {}
     }
-    "$pid" | Set-Content $lockFile -NoNewline
+    "$callerPid" | Set-Content $lockFile -NoNewline
     return $true
 }
 
@@ -174,7 +174,6 @@ $usageCache = "$claudeDir\.statusline_usage_cache"
 
 if ($null -eq $fiveH) {
     $oauthOwnerFile = "$claudeDir\.sl_oauth_owner"
-
     $_isOwner = claimLock $oauthOwnerFile $myPid
 
     if ($_isOwner) {
@@ -200,18 +199,15 @@ if ($null -eq $fiveH) {
                     $tok = (Get-Content $credsFile -Raw | ConvertFrom-Json -ErrorAction Stop).claudeAiOauth.accessToken
                 } catch { $tok = $null }
                 if ($tok) {
-                    Start-Job -ScriptBlock {
-                        param($token, $cachePath)
-                        try {
-                            $r = Invoke-RestMethod -Uri 'https://api.anthropic.com/api/oauth/usage' `
-                                -Headers @{ Authorization = "Bearer $token" } -TimeoutSec 3 -ErrorAction Stop
-                            [ordered]@{
-                                five_hour  = $r.five_hour.utilization
-                                seven_day  = $r.seven_day.utilization
-                                fetched_at = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-                            } | ConvertTo-Json | Set-Content $cachePath -NoNewline
-                        } catch {}
-                    } -ArgumentList $tok, $usageCache | Out-Null
+                    try {
+                        $r = Invoke-RestMethod -Uri 'https://api.anthropic.com/api/oauth/usage' `
+                            -Headers @{ Authorization = "Bearer $tok" } -TimeoutSec 3 -ErrorAction Stop
+                        [ordered]@{
+                            five_hour  = $r.five_hour.utilization
+                            seven_day  = $r.seven_day.utilization
+                            fetched_at = $now
+                        } | ConvertTo-Json | Set-Content $usageCache -NoNewline
+                    } catch {}
                 }
             }
         }
