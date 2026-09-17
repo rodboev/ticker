@@ -59,8 +59,8 @@ for w in 140 130 125 122 118 115 112 110 108 105 102 100 97 95 92 90 88 85 82 80
 
   elapsed=$(( $(_ms) - t0 ))
   s=$(printf '%s' "$line1" | strip_ansi)
-  if [[ ! "$s" =~ \|\ (cache\ )?[0-9]+m[0-9]+s\ \|\ 50k\  ]]; then
-    echo "FAIL: cache must immediately precede context at width $w"
+  if [[ ! "$s" =~ \|\ (cache\ )?[0-9]+m[0-9]+s\ \|\ 📁\  ]]; then
+    echo "FAIL: cache must immediately precede folder at width $w"
     (( failures++ ))
   fi
   printf "W=%3d max=%3d len=%3d [%s] %5dms: %s\n" "$w" "$max" "$len" "$tag" "$elapsed" "$s"

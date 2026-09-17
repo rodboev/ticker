@@ -47,9 +47,9 @@ foreach ($w in $widths) {
     $out = $json | pwsh -NoProfile -File $tmp 2>$null
     $lines = $out -split "`n"
     $s = strip $lines[0]
-    if ($LASTEXITCODE -ne 0 -or $s -notmatch '\| (?:cache )?\d+m\d+s \| 50k ') {
+    if ($LASTEXITCODE -ne 0 -or $s -notmatch '\| (?:cache )?\d+m\d+s \| 📁 ') {
         $failures++
-        Write-Output "FAIL: cache must immediately precede context at width $w"
+        Write-Output "FAIL: cache must immediately precede folder at width $w"
     }
     $maxW = $w - 4
     $over = $s.Length - $maxW

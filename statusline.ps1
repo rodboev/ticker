@@ -748,6 +748,10 @@ if ($model) {
     $segments['model'] = $s
 }
 
+if ($cacheRemaining) {
+    $segments['cache'] = "${cGray}cache $(tierColor $cacheElapsedPct @(30,60,80))${cacheRemaining}"
+}
+
 $displayDir = if ($activeBranch -and $activeDir) { $activeDir } else { $projectDir }
 $proj = if ($displayDir) { Split-Path $displayDir -Leaf } else { "" }
 if ($proj) {
@@ -776,10 +780,6 @@ if ($shellEpoch -gt 0 -and $shellCount -gt 0) {
         if ($descTrunc) { $shellSeg += " ${cDim}${descTrunc}" }
         $segments['shell'] = $shellSeg
     }
-}
-
-if ($cacheRemaining) {
-    $segments['cache'] = "${cGray}cache $(tierColor $cacheElapsedPct @(30,60,80))${cacheRemaining}"
 }
 
 $ctxP = [math]::Round($ctxPct)

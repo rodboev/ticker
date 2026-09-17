@@ -676,20 +676,21 @@ if [ -n "$MODEL" ]; then
   [ -n "$EFFORT" ] && OUT+=" ${C_GRAY}(${EFFORT})"
 fi
 
+SEG_PROJECT=""
 PROJ=$(basename "$PROJECT_DIR" 2>/dev/null)
 if [ -n "$PROJ" ]; then
-  [ -n "$OUT" ] && OUT+="${SEP}"
   if [ "$IN_GIT" = "true" ]; then
-    OUT+="${C_PROJ}📁 ${PROJ} ${C_GRAY}(${BRANCH})"
+    SEG_PROJECT="${SEP}${C_PROJ}📁 ${PROJ} ${C_GRAY}(${BRANCH})"
   else
-    OUT+="${C_PROJ}📁 ${PROJ} ${C_DIM}(untracked)"
+    SEG_PROJECT="${SEP}${C_PROJ}📁 ${PROJ} ${C_DIM}(untracked)"
   fi
 fi
 
+SEG_DIFF=""
 LADD=$(awk "BEGIN { print int(${LINES_ADD:-0}) }")
 LDEL=$(awk "BEGIN { print int(${LINES_DEL:-0}) }")
 if [ "$IN_GIT" = "true" ] && (( LADD > 0 || LDEL > 0 )); then
-  OUT+="${SEP}${C_ADD}+${LADD}${C_DEL}/-${LDEL}"
+  SEG_DIFF="${SEP}${C_ADD}+${LADD}${C_DEL}/-${LDEL}"
 fi
 
 CTX_P=$(awk "BEGIN { print int($CTX_PCT+0.5) }")
@@ -731,7 +732,7 @@ MAX_W=$(( WIDTH - 4 ))
 _cur_bar=8
 _rate_dropped=false
 
-_over() { local l=$(vis_len "${OUT}${SEG_CACHE}${SEG_CTX}${SEG_5H}${SEG_7D}"); (( l > MAX_W )); }
+_over() { local l=$(vis_len "${OUT}${SEG_CACHE}${SEG_PROJECT}${SEG_DIFF}${SEG_CTX}${SEG_5H}${SEG_7D}"); (( l > MAX_W )); }
 
 _rebuild_bars() {
   local _bw=$_cur_bar
@@ -742,15 +743,14 @@ _rebuild_bars() {
     [ -n "$EFFORT" ] && OUT+=" ${C_GRAY}(${EFFORT})"
   fi
   if [ -n "$PROJ" ]; then
-    [ -n "$OUT" ] && OUT+="${SEP}"
-    if [ "$IN_GIT" = "true" ]; then
-      OUT+="${C_PROJ}📁 ${PROJ} ${C_GRAY}(${BRANCH})"
+      if [ "$IN_GIT" = "true" ]; then
+      SEG_PROJECT="${SEP}${C_PROJ}📁 ${PROJ} ${C_GRAY}(${BRANCH})"
     else
-      OUT+="${C_PROJ}📁 ${PROJ} ${C_DIM}(untracked)"
+      SEG_PROJECT="${SEP}${C_PROJ}📁 ${PROJ} ${C_DIM}(untracked)"
     fi
   fi
   if [ "$IN_GIT" = "true" ] && (( LADD > 0 || LDEL > 0 )); then
-    OUT+="${SEP}${C_ADD}+${LADD}${C_DEL}/-${LDEL}"
+    SEG_DIFF="${SEP}${C_ADD}+${LADD}${C_DEL}/-${LDEL}"
   fi
   SEG_CTX="${SEP}${C_GRAY}${U_FMT} $(make_bar "$CTX_PCT" "$_bw") $(pct_color "$CTX_PCT")${CTX_P}%"
 
@@ -803,7 +803,7 @@ fi
 # 11. 5h remove
 if _over; then SEG_5H=""; fi
 
-OUT="${OUT}${SEG_CACHE}${SEG_CTX}${SEG_5H}${SEG_7D}"
+OUT="${OUT}${SEG_CACHE}${SEG_PROJECT}${SEG_DIFF}${SEG_CTX}${SEG_5H}${SEG_7D}"
 
 # ── Agents line ──────────────────────────────────────────
 AGENTS_LINE=""
