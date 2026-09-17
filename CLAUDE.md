@@ -31,10 +31,10 @@ Full compute (transcript parsing, git branch, agent scanning) runs every `$FULL_
 2. **Project** — folder emoji, project name, git branch or "(untracked)"
 3. **Diff** — `+N/-M` lines added/removed (only when in git)
 4. **Shell** — hourglass + elapsed time + description for in-flight Bash/PowerShell commands (`⏳ 45s Install deps`), shown only after 3s; multiplier shown for parallel calls (`×2`)
-5. **Context** — token count, progress bar, percentage
-6. **5h rate** — progress bar, percentage, optional rate-of-change `(↑N%/hr)`
-7. **7d rate** — progress bar, percentage
-8. **Cache** — countdown timer (`cache 4m5s` or collapsed `-4m5s`)
+5. **Cache** — countdown timer (`cache 4m5s` or collapsed `4m5s`)
+6. **Context** — token count, progress bar, percentage
+7. **5h rate** — progress bar, percentage, optional rate-of-change `(↑N%/hr)`
+8. **7d rate** — progress bar, percentage
 
 ### Collapse cascade
 

@@ -695,7 +695,7 @@ fi
 CTX_P=$(awk "BEGIN { print int($CTX_PCT+0.5) }")
 CTX_USED=$(awk "BEGIN { printf \"%.0f\", $CTX_SIZE * $CTX_PCT / 100 }")
 U_FMT=$(fmt_tok "${CTX_USED}")
-OUT+="${SEP}${C_GRAY}${U_FMT} $(make_bar "$CTX_PCT" 8) $(pct_color "$CTX_PCT")${CTX_P}%"
+SEG_CTX="${SEP}${C_GRAY}${U_FMT} $(make_bar "$CTX_PCT" 8) $(pct_color "$CTX_PCT")${CTX_P}%"
 
 SEG_5H="" SEG_5H_MID="" SEG_5H_SHORT=""
 if [ -n "$FIVE_H" ]; then
@@ -731,13 +731,10 @@ MAX_W=$(( WIDTH - 4 ))
 _cur_bar=8
 _rate_dropped=false
 
-_over() { local l=$(vis_len "${OUT}${SEG_5H}${SEG_7D}${SEG_CACHE}"); (( l > MAX_W )); }
+_over() { local l=$(vis_len "${OUT}${SEG_CACHE}${SEG_CTX}${SEG_5H}${SEG_7D}"); (( l > MAX_W )); }
 
 _rebuild_bars() {
   local _bw=$_cur_bar
-  CTX_BAR_OUT="${SEP}${C_GRAY}${U_FMT} $(make_bar "$CTX_PCT" "$_bw") $(pct_color "$CTX_PCT")${CTX_P}%"
-  # Rebuild OUT up to ctx (replace the ctx segment which is the last SEP-delimited piece before 5h)
-  # Simpler: rebuild OUT from scratch since segments are appended
   OUT=""
   if [ -n "$MODEL" ]; then
     OUT+="${C_MODEL}${MODEL_STR}"
@@ -755,7 +752,7 @@ _rebuild_bars() {
   if [ "$IN_GIT" = "true" ] && (( LADD > 0 || LDEL > 0 )); then
     OUT+="${SEP}${C_ADD}+${LADD}${C_DEL}/-${LDEL}"
   fi
-  OUT+="${SEP}${C_GRAY}${U_FMT} $(make_bar "$CTX_PCT" "$_bw") $(pct_color "$CTX_PCT")${CTX_P}%"
+  SEG_CTX="${SEP}${C_GRAY}${U_FMT} $(make_bar "$CTX_PCT" "$_bw") $(pct_color "$CTX_PCT")${CTX_P}%"
 
   if [ -n "$FIVE_H" ] && [ -n "$SEG_5H" ]; then
     if $_rate_dropped; then
@@ -806,7 +803,7 @@ fi
 # 11. 5h remove
 if _over; then SEG_5H=""; fi
 
-OUT="${OUT}${SEG_5H}${SEG_7D}${SEG_CACHE}"
+OUT="${OUT}${SEG_CACHE}${SEG_CTX}${SEG_5H}${SEG_7D}"
 
 # ── Agents line ──────────────────────────────────────────
 AGENTS_LINE=""

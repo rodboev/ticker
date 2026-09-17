@@ -8,11 +8,11 @@ $ErrorActionPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 # ── Tuning constants ────────────────────────────────────
-$WIDTH            = 106     # terminal width (default 120)
+$WIDTH            = 120     # terminal width (default 120)
 $OAUTH_TTL        = 60      # seconds between OAuth usage API calls
 $FULL_INTERVAL    = 10      # seconds between full recomputes (no agents)
 $AGENT_INTERVAL   = 5       # seconds between full recomputes (agents active)
-$REFRESH_INTERVAL = 3       # match statusLine.refreshInterval in settings.json
+$REFRESH_INTERVAL = 10       # match statusLine.refreshInterval in settings.json
 $SHOW_RESUME_LINE = $true  # add a resume command line below the main row
 
 $rawInput = [Console]::In.ReadToEnd()
@@ -778,6 +778,10 @@ if ($shellEpoch -gt 0 -and $shellCount -gt 0) {
     }
 }
 
+if ($cacheRemaining) {
+    $segments['cache'] = "${cGray}cache $(tierColor $cacheElapsedPct @(30,60,80))${cacheRemaining}"
+}
+
 $ctxP = [math]::Round($ctxPct)
 $ctxUsed = [math]::Round($ctxSize * $ctxPct / 100)
 $uFmt = fmtTok $ctxUsed
@@ -802,10 +806,6 @@ if ($null -ne $sevenD) {
     $pw = [math]::Round($sevenD)
     $segments['7d'] = "${cGray}7d $(makeBar $sevenD) $(tierColor $sevenD @(30,60,80))${pw}%"
     $seg7dShort     = "${cGray}7d: $(tierColor $sevenD @(30,60,80))${pw}%"
-}
-
-if ($cacheRemaining) {
-    $segments['cache'] = "${cGray}cache $(tierColor $cacheElapsedPct @(30,60,80))${cacheRemaining}"
 }
 
 $MAX_W = $WIDTH - 4
