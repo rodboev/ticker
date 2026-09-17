@@ -36,6 +36,15 @@ Full compute (transcript parsing, git branch, agent scanning) runs every `$FULL_
 7. **5h rate** — progress bar, percentage, optional rate-of-change `(↑N%/hr)`
 8. **7d rate** — progress bar, percentage
 
+### Editable order
+
+Edit `$SEGMENT_ORDER` near the top of `statusline.ps1`, or `SEGMENT_ORDER`
+in `statusline.sh`. Move names to reorder the main row. Omit a name to hide it.
+PowerShell uses lowercase names and includes `shell`; Bash uses uppercase names.
+For example, moving `cache` before `model` puts the countdown first.
+Each element keeps its existing width collapse priority. Extra lines keep their
+existing order.
+
 ### Collapse cascade
 
 When the rendered line exceeds `$WIDTH - 4`, steps fire in order until it fits. Each step fires only if still over width:
@@ -134,6 +143,7 @@ Both scripts have a test harness in this directory. Each creates temp copies wit
 
 - **PowerShell**: `pwsh -NoProfile -File test_cascade.ps1`
 - **Bash**: `bash test_cascade.sh`
+- **Editable order**: `python test_order.py` checks both scripts with reversed order and omitted elements at wide and narrow widths.
 
 All lines must fit within `$WIDTH - 4`. Any overflow reports as `OVER` and exits with code 1.
 

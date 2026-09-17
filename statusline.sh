@@ -9,7 +9,9 @@ input=$(cat)
 command -v jq &>/dev/null || { echo "jq required"; exit 0; }
 
 # ── Tuning constants ────────────────────────────────────
-WIDTH=120           # terminal width (default 120)
+# Reorder or omit main-row elements; collapse priority stays fixed.
+SEGMENT_ORDER=(MODEL CACHE PROJECT DIFF CTX 5H 7D)
+WIDTH=96            # terminal width (default 120)
 OAUTH_TTL=60        # seconds between OAuth usage API calls
 FULL_INTERVAL=10    # seconds between full recomputes (no agents)
 AGENT_INTERVAL=5    # seconds between full recomputes (agents active)
@@ -666,23 +668,23 @@ if (( CACHE_EPOCH > 0 )); then
 fi
 
 # ── Build output ─────────────────────────────────────────
-OUT=""
+SEG_MODEL=""
 
 if [ -n "$MODEL" ]; then
   MODEL_STR="${MODEL/ (1M context)/}"
-  OUT+="${C_MODEL}${MODEL_STR}"
+  SEG_MODEL+="${C_MODEL}${MODEL_STR}"
   CTX_INT=$(awk "BEGIN { printf \"%.0f\", $CTX_SIZE }")
-  (( CTX_INT >= 1000000 )) && OUT+=" ${C_DIM}[1M]"
-  [ -n "$EFFORT" ] && OUT+=" ${C_GRAY}(${EFFORT})"
+  (( CTX_INT >= 1000000 )) && SEG_MODEL+=" ${C_DIM}[1M]"
+  [ -n "$EFFORT" ] && SEG_MODEL+=" ${C_GRAY}(${EFFORT})"
 fi
 
 SEG_PROJECT=""
 PROJ=$(basename "$PROJECT_DIR" 2>/dev/null)
 if [ -n "$PROJ" ]; then
   if [ "$IN_GIT" = "true" ]; then
-    SEG_PROJECT="${SEP}${C_PROJ}📁 ${PROJ} ${C_GRAY}(${BRANCH})"
+    SEG_PROJECT="${C_PROJ}📁 ${PROJ} ${C_GRAY}(${BRANCH})"
   else
-    SEG_PROJECT="${SEP}${C_PROJ}📁 ${PROJ} ${C_DIM}(untracked)"
+    SEG_PROJECT="${C_PROJ}📁 ${PROJ} ${C_DIM}(untracked)"
   fi
 fi
 
@@ -690,13 +692,13 @@ SEG_DIFF=""
 LADD=$(awk "BEGIN { print int(${LINES_ADD:-0}) }")
 LDEL=$(awk "BEGIN { print int(${LINES_DEL:-0}) }")
 if [ "$IN_GIT" = "true" ] && (( LADD > 0 || LDEL > 0 )); then
-  SEG_DIFF="${SEP}${C_ADD}+${LADD}${C_DEL}/-${LDEL}"
+  SEG_DIFF="${C_ADD}+${LADD}${C_DEL}/-${LDEL}"
 fi
 
 CTX_P=$(awk "BEGIN { print int($CTX_PCT+0.5) }")
 CTX_USED=$(awk "BEGIN { printf \"%.0f\", $CTX_SIZE * $CTX_PCT / 100 }")
 U_FMT=$(fmt_tok "${CTX_USED}")
-SEG_CTX="${SEP}${C_GRAY}${U_FMT} $(make_bar "$CTX_PCT" 8) $(pct_color "$CTX_PCT")${CTX_P}%"
+SEG_CTX="${C_GRAY}${U_FMT} $(make_bar "$CTX_PCT" 8) $(pct_color "$CTX_PCT")${CTX_P}%"
 
 SEG_5H="" SEG_5H_MID="" SEG_5H_SHORT=""
 if [ -n "$FIVE_H" ]; then
@@ -711,58 +713,60 @@ if [ -n "$FIVE_H" ]; then
     fi
     RATE_STR=" ${C_GRAY}($(rate_color "$R_ABS")${ARROW}${R_ABS}%${C_GRAY}/hr)"
   fi
-  SEG_5H="${SEP}${C_GRAY}5h $(make_bar "$FIVE_H" 8) $(pct_color "$FIVE_H")${P5}%${RATE_STR}"
-  SEG_5H_MID="${SEP}${C_GRAY}5h $(make_bar "$FIVE_H" 8) $(pct_color "$FIVE_H")${P5}%"
-  SEG_5H_SHORT="${SEP}${C_GRAY}5h: $(pct_color "$FIVE_H")${P5}%"
+  SEG_5H="${C_GRAY}5h $(make_bar "$FIVE_H" 8) $(pct_color "$FIVE_H")${P5}%${RATE_STR}"
+  SEG_5H_MID="${C_GRAY}5h $(make_bar "$FIVE_H" 8) $(pct_color "$FIVE_H")${P5}%"
+  SEG_5H_SHORT="${C_GRAY}5h: $(pct_color "$FIVE_H")${P5}%"
 fi
 
 SEG_7D="" SEG_7D_SHORT=""
 if [ -n "$SEVEN_D" ]; then
   PW=$(awk "BEGIN { print int($SEVEN_D+0.5) }")
-  SEG_7D="${SEP}${C_GRAY}7d $(make_bar "$SEVEN_D" 8) $(pct_color "$SEVEN_D")${PW}%"
-  SEG_7D_SHORT="${SEP}${C_GRAY}7d: $(pct_color "$SEVEN_D")${PW}%"
+  SEG_7D="${C_GRAY}7d $(make_bar "$SEVEN_D" 8) $(pct_color "$SEVEN_D")${PW}%"
+  SEG_7D_SHORT="${C_GRAY}7d: $(pct_color "$SEVEN_D")${PW}%"
 fi
 
 SEG_CACHE=""
 if [ -n "$CACHE_REMAINING" ]; then
-  SEG_CACHE="${SEP}${C_GRAY}cache $(pct_color "$CACHE_ELAPSED_PCT")${CACHE_REMAINING}"
+  SEG_CACHE="${C_GRAY}cache $(pct_color "$CACHE_ELAPSED_PCT")${CACHE_REMAINING}"
 fi
 
 MAX_W=$(( WIDTH - 4 ))
 _cur_bar=8
 _rate_dropped=false
 
-_over() { local l=$(vis_len "${OUT}${SEG_CACHE}${SEG_PROJECT}${SEG_DIFF}${SEG_CTX}${SEG_5H}${SEG_7D}"); (( l > MAX_W )); }
+_compose() {
+  OUT=""
+  local key name value
+  for key in "${SEGMENT_ORDER[@]}"; do
+    name="SEG_$key"
+    value=${!name}
+    [ -n "$value" ] || continue
+    [ -n "$OUT" ] && OUT+="$SEP"
+    OUT+="$value"
+  done
+}
+
+_over() { _compose; local l=$(vis_len "$OUT"); (( l > MAX_W )); }
 
 _rebuild_bars() {
   local _bw=$_cur_bar
-  OUT=""
+  SEG_MODEL=""
   if [ -n "$MODEL" ]; then
-    OUT+="${C_MODEL}${MODEL_STR}"
-    (( CTX_INT >= 1000000 )) && ! $_1m_removed && OUT+=" ${C_DIM}[1M]"
-    [ -n "$EFFORT" ] && OUT+=" ${C_GRAY}(${EFFORT})"
+    SEG_MODEL+="${C_MODEL}${MODEL_STR}"
+    (( CTX_INT >= 1000000 )) && ! $_1m_removed && SEG_MODEL+=" ${C_DIM}[1M]"
+    [ -n "$EFFORT" ] && SEG_MODEL+=" ${C_GRAY}(${EFFORT})"
   fi
-  if [ -n "$PROJ" ]; then
-      if [ "$IN_GIT" = "true" ]; then
-      SEG_PROJECT="${SEP}${C_PROJ}📁 ${PROJ} ${C_GRAY}(${BRANCH})"
-    else
-      SEG_PROJECT="${SEP}${C_PROJ}📁 ${PROJ} ${C_DIM}(untracked)"
-    fi
-  fi
-  if [ "$IN_GIT" = "true" ] && (( LADD > 0 || LDEL > 0 )); then
-    SEG_DIFF="${SEP}${C_ADD}+${LADD}${C_DEL}/-${LDEL}"
-  fi
-  SEG_CTX="${SEP}${C_GRAY}${U_FMT} $(make_bar "$CTX_PCT" "$_bw") $(pct_color "$CTX_PCT")${CTX_P}%"
+  SEG_CTX="${C_GRAY}${U_FMT} $(make_bar "$CTX_PCT" "$_bw") $(pct_color "$CTX_PCT")${CTX_P}%"
 
   if [ -n "$FIVE_H" ] && [ -n "$SEG_5H" ]; then
     if $_rate_dropped; then
-      SEG_5H="${SEP}${C_GRAY}5h $(make_bar "$FIVE_H" "$_bw") $(pct_color "$FIVE_H")${P5}%"
+      SEG_5H="${C_GRAY}5h $(make_bar "$FIVE_H" "$_bw") $(pct_color "$FIVE_H")${P5}%"
     else
-      SEG_5H="${SEP}${C_GRAY}5h $(make_bar "$FIVE_H" "$_bw") $(pct_color "$FIVE_H")${P5}%${RATE_STR}"
+      SEG_5H="${C_GRAY}5h $(make_bar "$FIVE_H" "$_bw") $(pct_color "$FIVE_H")${P5}%${RATE_STR}"
     fi
   fi
   if [ -n "$SEVEN_D" ] && [ -n "$SEG_7D" ]; then
-    SEG_7D="${SEP}${C_GRAY}7d $(make_bar "$SEVEN_D" "$_bw") $(pct_color "$SEVEN_D")${PW}%"
+    SEG_7D="${C_GRAY}7d $(make_bar "$SEVEN_D" "$_bw") $(pct_color "$SEVEN_D")${PW}%"
   fi
 }
 
@@ -771,7 +775,7 @@ _1m_removed=false
 # Collapse cascade
 # 1. cache label removed
 if _over && [ -n "$SEG_CACHE" ]; then
-  SEG_CACHE="${SEP}$(pct_color "$CACHE_ELAPSED_PCT")${CACHE_REMAINING}"
+  SEG_CACHE="$(pct_color "$CACHE_ELAPSED_PCT")${CACHE_REMAINING}"
 fi
 # 2. [1M] removed
 if _over && (( CTX_INT >= 1000000 )); then
@@ -788,7 +792,7 @@ done
 # 7. 5h rate drop
 if _over && [ -n "$SEG_5H" ] && [ -n "$FIVE_H" ]; then
   _rate_dropped=true
-  SEG_5H="${SEP}${C_GRAY}5h $(make_bar "$FIVE_H" "$_cur_bar") $(pct_color "$FIVE_H")${P5}%"
+  SEG_5H="${C_GRAY}5h $(make_bar "$FIVE_H" "$_cur_bar") $(pct_color "$FIVE_H")${P5}%"
 fi
 # 8. 7d -> text
 if _over && [ -n "$SEG_7D" ]; then
@@ -803,7 +807,7 @@ fi
 # 11. 5h remove
 if _over; then SEG_5H=""; fi
 
-OUT="${OUT}${SEG_CACHE}${SEG_PROJECT}${SEG_DIFF}${SEG_CTX}${SEG_5H}${SEG_7D}"
+_compose
 
 # ── Agents line ──────────────────────────────────────────
 AGENTS_LINE=""

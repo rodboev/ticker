@@ -8,7 +8,9 @@ $ErrorActionPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 # ── Tuning constants ────────────────────────────────────
-$WIDTH            = 120     # terminal width (default 120)
+# Reorder or omit main-row elements; collapse priority stays fixed.
+$SEGMENT_ORDER = @('model', 'cache', 'project', 'diff', 'shell', 'ctx', '5h', '7d')
+$WIDTH            = 96      # terminal width (default 120)
 $OAUTH_TTL        = 60      # seconds between OAuth usage API calls
 $FULL_INTERVAL    = 10      # seconds between full recomputes (no agents)
 $AGENT_INTERVAL   = 5       # seconds between full recomputes (agents active)
@@ -807,6 +809,12 @@ if ($null -ne $sevenD) {
     $segments['7d'] = "${cGray}7d $(makeBar $sevenD) $(tierColor $sevenD @(30,60,80))${pw}%"
     $seg7dShort     = "${cGray}7d: $(tierColor $sevenD @(30,60,80))${pw}%"
 }
+
+$orderedSegments = [ordered]@{}
+foreach ($key in $SEGMENT_ORDER) {
+    if ($segments.Contains($key)) { $orderedSegments[$key] = $segments[$key] }
+}
+$segments = $orderedSegments
 
 $MAX_W = $WIDTH - 4
 $script:curBarW = 8
