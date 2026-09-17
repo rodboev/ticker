@@ -72,7 +72,7 @@ make_bar() {
 _ESC=$'\x1b'
 vis_len() {
   printf '%s' "$1" | sed "s/${_ESC}\[[0-9;]*m//g" \
-    | sed 's/▓/X/g;s/░/X/g;s/📁/X/g;s/↑/X/g;s/↓/X/g;s/→/X/g;s/✓/X/g' | wc -c
+    | sed 's/▓/X/g;s/░/X/g;s/📁/X/g;s/🟢/XX/g;s/⚪/XX/g;s/↑/X/g;s/↓/X/g;s/→/X/g;s/✓/X/g' | wc -c
 }
 
 fmt_tok() {
@@ -675,16 +675,19 @@ if [ -n "$MODEL" ]; then
   SEG_MODEL+="${C_MODEL}${MODEL_STR}"
   CTX_INT=$(awk "BEGIN { printf \"%.0f\", $CTX_SIZE }")
   (( CTX_INT >= 1000000 )) && SEG_MODEL+=" ${C_DIM}[1M]"
-  [ -n "$EFFORT" ] && SEG_MODEL+=" ${C_GRAY}(${EFFORT})"
+  [ -n "$EFFORT" ] && SEG_MODEL+=" ${C_GRAY}${EFFORT}"
 fi
 
 SEG_PROJECT=""
 PROJ=$(basename "$PROJECT_DIR" 2>/dev/null)
 if [ -n "$PROJ" ]; then
   if [ "$IN_GIT" = "true" ]; then
-    SEG_PROJECT="${C_PROJ}📁 ${PROJ} ${C_GRAY}(${BRANCH})"
+    SEG_PROJECT="${C_PROJ}🟢 📁 ${PROJ}"
+    if [[ -n "$BRANCH" && "$BRANCH" != main && "$BRANCH" != master ]]; then
+      SEG_PROJECT+=" ${C_GRAY}(${BRANCH})"
+    fi
   else
-    SEG_PROJECT="${C_PROJ}📁 ${PROJ} ${C_DIM}(untracked)"
+    SEG_PROJECT="${C_PROJ}⚪ 📁 ${PROJ}"
   fi
 fi
 
@@ -754,7 +757,7 @@ _rebuild_bars() {
   if [ -n "$MODEL" ]; then
     SEG_MODEL+="${C_MODEL}${MODEL_STR}"
     (( CTX_INT >= 1000000 )) && ! $_1m_removed && SEG_MODEL+=" ${C_DIM}[1M]"
-    [ -n "$EFFORT" ] && SEG_MODEL+=" ${C_GRAY}(${EFFORT})"
+    [ -n "$EFFORT" ] && SEG_MODEL+=" ${C_GRAY}${EFFORT}"
   fi
   SEG_CTX="${C_GRAY}${U_FMT} $(make_bar "$CTX_PCT" "$_bw") $(pct_color "$CTX_PCT")${CTX_P}%"
 

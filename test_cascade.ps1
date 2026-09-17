@@ -47,12 +47,12 @@ foreach ($w in $widths) {
     $out = $json | pwsh -NoProfile -File $tmp 2>$null
     $lines = $out -split "`n"
     $s = strip $lines[0]
-    if ($LASTEXITCODE -ne 0 -or $s -notmatch '\| (?:cache )?\d+m\d+s \| 📁 ') {
+    if ($LASTEXITCODE -ne 0 -or $s -notmatch '\| (?:cache )?\d+m\d+s \| (?:🟢|⚪) 📁 ') {
         $failures++
         Write-Output "FAIL: cache must immediately precede folder at width $w"
     }
     $maxW = $w - 4
-    $over = $s.Length - $maxW
+    $over = $s.Replace("`u{26AA}", "XX").Length - $maxW
     $tag = if ($over -le 0) { "  OK" } else { $failures++; "OVER" }
 
     $ms = $sw.ElapsedMilliseconds

@@ -10,7 +10,7 @@ CLAUDE_DIR="$HOME/.claude"
 strip_ansi() { sed 's/\x1b\[[0-9;]*m//g'; }
 vis_len() {
   printf '%s' "$1" | strip_ansi \
-    | sed 's/▓/X/g;s/░/X/g;s/📁/X/g;s/↑/X/g;s/↓/X/g;s/→/X/g;s/✓/X/g' | wc -c
+    | sed 's/▓/X/g;s/░/X/g;s/📁/X/g;s/🟢/XX/g;s/⚪/XX/g;s/↑/X/g;s/↓/X/g;s/→/X/g;s/✓/X/g' | wc -c
 }
 
 NOW=$(date +%s)
@@ -59,7 +59,7 @@ for w in 140 130 125 122 118 115 112 110 108 105 102 100 97 95 92 90 88 85 82 80
 
   elapsed=$(( $(_ms) - t0 ))
   s=$(printf '%s' "$line1" | strip_ansi)
-  if [[ ! "$s" =~ \|\ (cache\ )?[0-9]+m[0-9]+s\ \|\ 📁\  ]]; then
+  if [[ ! "$s" =~ \|\ (cache\ )?[0-9]+m[0-9]+s\ \|\ [🟢⚪]\ 📁\  ]]; then
     echo "FAIL: cache must immediately precede folder at width $w"
     (( failures++ ))
   fi

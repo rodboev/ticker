@@ -60,7 +60,7 @@ function fmtTok([double]$n) {
 }
 
 $script:_ansiRe = [regex]'\x1b\[[0-9;]*m'
-function visLen([string]$s) { $script:_ansiRe.Replace($s, '').Length }
+function visLen([string]$s) { $script:_ansiRe.Replace($s, '').Replace("`u{26AA}", 'XX').Length }
 
 function isStale([string]$file, [int]$ttl) {
     if (-not (Test-Path $file)) { return $true }
@@ -746,7 +746,7 @@ if ($model) {
     $modelStr = $model -replace '\s*\(1M context\)', ''
     $s = "${cModel}${modelStr}"
     if ($ctxSize -ge 1000000) { $s += " ${cDim}[1M]" }
-    if ($effort) { $s += " ${cGray}(${effort})" }
+    if ($effort) { $s += " ${cGray}${effort}" }
     $segments['model'] = $s
 }
 
@@ -758,9 +758,10 @@ $displayDir = if ($activeBranch -and $activeDir) { $activeDir } else { $projectD
 $proj = if ($displayDir) { Split-Path $displayDir -Leaf } else { "" }
 if ($proj) {
     if ($inGit) {
-        $segments['project'] = "${cProj}`u{1F4C1} ${proj} ${cGray}(${branch})"
+        $segments['project'] = "${cProj}`u{1F7E2} `u{1F4C1} ${proj}"
+        if ($branch -and $branch -cnotin @('main', 'master')) { $segments['project'] += " ${cGray}(${branch})" }
     } else {
-        $segments['project'] = "${cProj}`u{1F4C1} ${proj} ${cDim}(untracked)"
+        $segments['project'] = "${cProj}`u{26AA} `u{1F4C1} ${proj}"
     }
 }
 
@@ -848,7 +849,7 @@ $collapseSteps = @(
     } }
     { if ($segments.Contains('model') -and $ctxSize -ge 1000000) {
         $ms = "${cModel}$($model -replace '\s*\(1M context\)', '')"
-        if ($effort) { $ms += " ${cGray}(${effort})" }
+        if ($effort) { $ms += " ${cGray}${effort}" }
         $segments['model'] = $ms
     } }
     { if ($script:curBarW -gt 7) { $script:curBarW = 7; rebuildBars } }

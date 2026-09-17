@@ -16,14 +16,14 @@ with tempfile.TemporaryDirectory(prefix='statusline-order-') as tmp:
     state = home / '.claude'
     state.mkdir()
     env = dict(os.environ, USERPROFILE=str(home), HOME=home.as_posix())
-    data = dict(model=dict(display_name='Test'), workspace=dict(project_dir='/test/project'), transcript_path=(state / 'order.jsonl').as_posix(), context_window=dict(used_percentage=5, context_window_size=1000000), rate_limits=dict(five_hour=dict(used_percentage=18), seven_day=dict(used_percentage=34)))
+    data = dict(model=dict(display_name='Test'), effort=dict(level='max'), workspace=dict(project_dir='/test/project'), transcript_path=(state / 'order.jsonl').as_posix(), context_window=dict(used_percentage=5, context_window_size=1000000), rate_limits=dict(five_hour=dict(used_percentage=18), seven_day=dict(used_percentage=34)))
     for ext, command in [('ps1', [shutil.which('pwsh'), '-NoProfile', '-File']), ('sh', [shutil.which('bash')])]:
         source = (repo / f'statusline.{ext}').read_text(encoding='utf-8')
-        for width in [140, 80]:
+        for width, branch, tracked in [(140, 'main', True), (80, 'master', True), (140, 'feature/test', True), (80, '', False)]:
             baseline = None
             for order in orders:
                 now = int(time.time())
-                cache = dict(computed_at=now + 60, has_agents=False, cache_epoch=now, cache_ttl=300, agents=[], lines_add=12, lines_del=3, branch='main', in_git=True)
+                cache = dict(computed_at=now + 60, has_agents=False, cache_epoch=now, cache_ttl=300, agents=[], lines_add=12, lines_del=3, branch=branch, in_git=tracked)
                 (state / '.sl_compute_order').write_text(json.dumps(cache))
                 if ext == 'ps1':
                     patched = re.sub(r'(?m)^\$SEGMENT_ORDER = .*', '$SEGMENT_ORDER = @(' + ', '.join(repr(key) for key in order.split()) + ')', source)
@@ -39,7 +39,12 @@ with tempfile.TemporaryDirectory(prefix='statusline-order-') as tmp:
                 assert len(line) <= width - 4, line
                 if order == orders[0]:
                     baseline = parts
-                    assert re.search(r'cache \d+m\d+s \| 📁|\| \d+m\d+s \| 📁', line), line
+                    assert re.search(r'Test (?:\[1M\] )?max \|', line) and '(max)' not in line, line
+                    assert ('🟢 📁' if tracked else '⚪ 📁') in line, line
+                    assert '(main)' not in line and '(master)' not in line and '(untracked)' not in line, line
+                    if branch == 'feature/test':
+                        assert '(feature/test)' in line, line
+                    assert re.search(r'cache \d+m\d+s \| [🟢⚪] 📁|\| \d+m\d+s \| [🟢⚪] 📁', line), line
                 elif order == orders[1]:
                     assert parts == baseline[::-1], (baseline, parts)
                 else:

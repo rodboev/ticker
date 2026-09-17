@@ -29,7 +29,7 @@ Full compute (transcript parsing, git branch, agent scanning) runs every `$FULL_
 
 1. **Model** — display name, optional `[1M]` marker for 1M context, effort level
 2. **Cache** — countdown timer (`cache 4m5s` or collapsed `4m5s`)
-3. **Project** — folder emoji, project name, git branch or "(untracked)"
+3. **Project** — green circle for Git repos or white circle otherwise, folder emoji, project name, and branch unless `main` or `master`
 4. **Diff** — `+N/-M` lines added/removed (only when in git)
 5. **Shell** — hourglass + elapsed time + description for in-flight Bash/PowerShell commands (`⏳ 45s Install deps`), shown only after 3s; multiplier shown for parallel calls (`×2`)
 6. **Context** — token count, progress bar, percentage
