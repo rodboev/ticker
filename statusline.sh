@@ -842,7 +842,14 @@ if $SHOW_RESUME_LINE && [ -n "$RESUME_SESSION_ID" ]; then
     RESUME_LINE="cmd /c \"cd /d $PROJECT_DIR && $RESUME_LINE\""
   elif [ -n "$PROJECT_DIR" ]; then
     # Quote shell metacharacters too, so the command can be pasted safely.
-    printf -v _resume_dir '%q' "$PROJECT_DIR"
+    if [[ $PROJECT_DIR == "$HOME" ]]; then
+      _resume_dir="~"
+    elif [[ $PROJECT_DIR == "$HOME"/* ]]; then
+      printf -v _resume_dir '%q' "${PROJECT_DIR#"$HOME"/}"
+      _resume_dir="~/$_resume_dir"
+    else
+      printf -v _resume_dir '%q' "$PROJECT_DIR"
+    fi
     RESUME_LINE="cd $_resume_dir && $RESUME_LINE"
   fi
 fi
