@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Claude Code statusline — bashversion
+# Claude Code statusline — Bash version
 # Two-tier refresh: full compute every N seconds, cheap ticks in between
 # Adaptive agent refresh: full compute more often when agents are active
 
@@ -10,11 +10,13 @@ command -v jq &>/dev/null || { echo "jq required"; exit 0; }
 
 # ── Tuning constants ────────────────────────────────────
 # Reorder or omit main-row elements; collapse priority stays fixed.
-SEGMENT_ORDER=(MODEL CACHE PROJECT DIFF CTX 5H 7D)
+SEGMENT_ORDER=(MODEL CACHE PROJECT DIFF SHELL CTX 5H 7D)
 WIDTH=96            # terminal width (default 120)
 OAUTH_TTL=60        # seconds between OAuth usage API calls
 FULL_INTERVAL=10    # seconds between full recomputes (no agents)
 AGENT_INTERVAL=5    # seconds between full recomputes (agents active)
+REFRESH_INTERVAL=10 # match statusLine.refreshInterval in settings.json
+SHOW_RESUME_LINE=true
 
 fg() { printf '\033[38;2;%d;%d;%dm' "$1" "$2" "$3"; }
 RST=$'\033[0m'
@@ -28,11 +30,12 @@ C_DIM=$(fg 100 100 115)
 C_SEP=$(fg 60 60 80)
 C_BAR=$(fg 170 170 176)
 C_BAR_E=$(fg 100 100 108)
+C_SHELL=$(fg 180 160 255)
 
 SEP=" ${C_SEP}| "
 
 pct_color() {
-  local p=$(awk "BEGIN { print int(${1:-0}+0.5) }")
+  local p=$(awk "BEGIN { printf \"%.0f\", ${1:-0} }")
   if   (( p >= 80 )); then fg 255 144 144
   elif (( p >= 60 )); then fg 255 184 120
   elif (( p >= 30 )); then fg 255 241 150
@@ -60,7 +63,7 @@ agent_rate_color() {
 
 make_bar() {
   local pct=${1:-0} w=${2:-8}
-  local f=$(awk "BEGIN { v=int($pct*$w/100+0.5); if(v>$w)v=$w; if(v<0)v=0; print v }")
+  local f=$(awk "BEGIN { v=$pct*$w/100; if(v>$w)v=$w; if(v<0)v=0; printf \"%.0f\", v }")
   local e=$(( w - f ))
   local out="${C_BAR}"
   for ((i=0; i<f; i++)); do out+="▓"; done
@@ -69,10 +72,18 @@ make_bar() {
   printf '%s' "$out"
 }
 
-_ESC=$'\x1b'
 vis_len() {
-  printf '%s' "$1" | sed "s/${_ESC}\[[0-9;]*m//g" \
-    | sed 's/▓/X/g;s/░/X/g;s/📁/X/g;s/🟢/XX/g;s/⚪/XX/g;s/↑/X/g;s/↓/X/g;s/→/X/g;s/✓/X/g' | wc -c
+  local s=$1 ansi=$'\033['
+  while [[ $s == *"$ansi"*m* ]]; do
+    local rest=${s#*"$ansi"}
+    s=${s%%"$ansi"*}${rest#*m}
+  done
+  # Count UTF-8 code points even in Git Bash's C locale; these emoji occupy two columns.
+  local LC_ALL=C green white folder extra
+  green=${s//🟢/}; white=${s//⚪/}; folder=${s//📁/}
+  extra=$(( (${#s} - ${#green}) / 4 + (${#s} - ${#white}) / 3 + (${#s} - ${#folder}) / 4 ))
+  s=${s//[$'\200'-$'\277']/}
+  printf '%d' "$(( ${#s} + extra ))"
 }
 
 fmt_tok() {
@@ -80,19 +91,41 @@ fmt_tok() {
     n = ${1:-0}
     if (n >= 1000000) printf \"%.1fM\", n/1000000
     else if (n >= 1000) printf \"%.0fk\", n/1000
-    else printf \"%.0fk\", n/1000
+    else printf \"0k\"
   }"
 }
 
+round_ratio() {
+  local d=$2 q=$(( $1 / $2 )) r=$(( $1 % $2 ))
+  REPLY=$(( q + (r * 2 > d || (r * 2 == d && q % 2)) ))
+}
+
+pid_alive() {
+  [[ $1 =~ ^[0-9]+$ ]] && (( $1 > 0 )) || return 1
+  if [[ $OSTYPE == msys* || $OSTYPE == cygwin* ]]; then
+    # Session files contain native Windows PIDs, which kill -0 can't resolve.
+    if [ -z "${_windows_pids+x}" ]; then
+      _windows_pids="$(ps -W 2>/dev/null | awk 'NR > 1 { printf " %s %s", $1, $4 }') "
+    fi
+    [[ $_windows_pids == *" $1 "* ]]
+  else
+    kill -0 "$1" 2>/dev/null
+  fi
+}
+
 # ── Extract fields always needed ─────────────────────────
-TRANSCRIPT=$(echo "$input" | jq -r '.transcript_path // empty')
-PROJECT_DIR=$(echo "$input" | jq -r '.workspace.project_dir // empty')
-MODEL=$(echo "$input" | jq -r '.model.display_name // empty')
-EFFORT=$(echo "$input" | jq -r '.effort.level // empty')
-CTX_PCT=$(echo "$input" | jq -r '.context_window.used_percentage // 0')
-CTX_SIZE=$(echo "$input" | jq -r '.context_window.context_window_size // 200000')
-FIVE_H=$(echo "$input" | jq -r '.rate_limits.five_hour.used_percentage // empty')
-SEVEN_D=$(echo "$input" | jq -r '.rate_limits.seven_day.used_percentage // empty')
+mapfile -d '' -t _fields < <(printf '%s' "$input" | jq -sj 'select(length == 1) | .[0] | select(type == "object") |
+  [.transcript_path // "", .workspace.project_dir // "", .model.display_name // "",
+   .effort.level // "", .context_window.used_percentage // 0,
+   .context_window.context_window_size // 200000,
+   .rate_limits.five_hour.used_percentage // "", .rate_limits.seven_day.used_percentage // "",
+   .session_id // "", .cost.total_lines_added // 0, .cost.total_lines_removed // 0]
+  | .[] | tostring, "\u0000"' 2>/dev/null)
+(( ${#_fields[@]} == 11 )) || exit 0
+TRANSCRIPT=${_fields[0]//\\//} PROJECT_DIR=${_fields[1]}
+MODEL=${_fields[2]} EFFORT=${_fields[3]} CTX_PCT=${_fields[4]} CTX_SIZE=${_fields[5]}
+FIVE_H=${_fields[6]} SEVEN_D=${_fields[7]} _target_sid=${_fields[8]}
+_input_add=${_fields[9]} _input_del=${_fields[10]}
 
 _now=$(date +%s)
 
@@ -105,14 +138,14 @@ COMPUTE_CACHE="$HOME/.claude/.sl_compute_${SESSION_ID}"
 
 # ── Resolve this session's PID from session files ────────
 _my_pid=0
-_target_sid=$(echo "$input" | jq -r '.session_id // empty')
 [ -z "$_target_sid" ] && _target_sid="$SESSION_ID"
+RESUME_SESSION_ID=$_target_sid
 if [ -n "$_target_sid" ]; then
   for _sf in "$HOME/.claude/sessions/"*.json; do
     [ -f "$_sf" ] || continue
-    _sf_sid=$(jq -r '.sessionId // empty' "$_sf" 2>/dev/null)
-    if [ "$_sf_sid" = "$_target_sid" ]; then
-      _my_pid=$(jq -r '.pid // 0' "$_sf" 2>/dev/null)
+    _sf_pid=$(jq -r --arg sid "$_target_sid" 'select(.sessionId == $sid) | .pid // 0' "$_sf" 2>/dev/null)
+    if [ -n "$_sf_pid" ]; then
+      _my_pid=$_sf_pid
       break
     fi
   done
@@ -120,9 +153,35 @@ fi
 
 # ── Two-tier: decide full vs cheap tick ──────────────────
 _do_full=true
+_cc='{}'
 if [ -n "$SESSION_ID" ] && [ -f "$COMPUTE_CACHE" ]; then
-  _cc_at=$(jq -r '.computed_at // 0' "$COMPUTE_CACHE" 2>/dev/null)
-  _cc_agents=$(jq -r '.has_agents // false' "$COMPUTE_CACHE" 2>/dev/null)
+  _cc=$(cat "$COMPUTE_CACHE" 2>/dev/null)
+fi
+mapfile -d '' -t _cached < <(printf '%s' "$_cc" | jq -j '
+  [.computed_at // 0, .has_agents // false, .lines_add // 0, .lines_del // 0,
+   .branch // "", .in_git // false, .cache_epoch // 0, .cache_ttl // 300,
+   .shell_epoch // 0, .shell_desc // "", .shell_count // 0,
+   .active_dir // "", .active_branch // ""],
+  ((.agents // [])[] | with_entries(.key |= ascii_downcase) |
+   [.short // "agent", .tokens // 0, .rate // "", .model // "", .workflow // "",
+    .subcount // 0, ((.phases // []) | if type == "string" then fromjson else . end
+      | map(with_entries(.key |= ascii_downcase)
+        | {t: (.t // .title), d: (.d // .done), n: (.n // .total)}) | tojson)])
+  | .[] | tostring, "\u0000"' 2>/dev/null)
+_cc_at=${_cached[0]:-0} _cc_agents=${_cached[1]:-false}
+LINES_ADD=${_cached[2]:-0} LINES_DEL=${_cached[3]:-0}
+BRANCH=${_cached[4]} IN_GIT=${_cached[5]:-false}
+CACHE_EPOCH=${_cached[6]:-0} CACHE_TTL=${_cached[7]:-300}
+SHELL_EPOCH=${_cached[8]:-0} SHELL_DESC=${_cached[9]} SHELL_COUNT=${_cached[10]:-0}
+ACTIVE_DIR=${_cached[11]} ACTIVE_BRANCH=${_cached[12]}
+_ac=0; _a_descs=() _a_toks=() _a_rates=() _a_models=() _a_workflows=() _a_subcounts=() _a_phases=()
+for (( _i=13; _i<${#_cached[@]}; _i+=7 )); do
+  _a_descs+=("${_cached[_i]}") _a_toks+=("${_cached[_i+1]}") _a_rates+=("${_cached[_i+2]}")
+  _a_models+=("${_cached[_i+3]}") _a_workflows+=("${_cached[_i+4]}")
+  _a_subcounts+=("${_cached[_i+5]}") _a_phases+=("${_cached[_i+6]}")
+  (( _ac++ ))
+done
+if (( _cc_at > 0 )); then
   _cc_age=$(( _now - _cc_at ))
   if [ "$_cc_agents" = "true" ]; then
     _interval=$AGENT_INTERVAL
@@ -139,18 +198,12 @@ RATE_FILE="$HOME/.claude/.statusline_rate_history"
 RATE_LAST_WRITE="$HOME/.claude/.sl_rate_last_write"
 
 _calc_rate() {
-  [ -f "$RATE_FILE" ] || { echo ""; return; }
-  local now=$(date +%s) pct=$1
-  local cutoff=$(( now - 1800 ))
-  local oldest
-  oldest=$(awk -v c="$cutoff" '$1 >= c { print; exit }' "$RATE_FILE" 2>/dev/null)
-  [ -n "$oldest" ] || { echo ""; return; }
-  local old_t old_p dt
-  old_t=$(echo "$oldest" | awk '{print $1}')
-  old_p=$(echo "$oldest" | awk '{print $2}')
-  dt=$(( now - old_t ))
-  (( dt < 120 )) && { echo ""; return; }
-  awk "BEGIN { printf \"%.0f\", ($pct - $old_p) / ($dt / 3600.0) }"
+  [ -f "$RATE_FILE" ] || return
+  awk -v now="$_now" -v pct="$1" '$1 >= now - 1800 {
+    dt = now - $1
+    if (dt >= 120) printf "%.0f", (pct - $2) / (dt / 3600.0)
+    exit
+  }' "$RATE_FILE" 2>/dev/null
 }
 
 # ── OAuth usage (only when CC doesn't provide rate_limits) ──
@@ -166,7 +219,7 @@ if [ -z "$FIVE_H" ]; then
       _owner_pid=$(cat "$OAUTH_OWNER" 2>/dev/null | tr -d '[:space:]')
       if [ "$_owner_pid" = "$_my_pid" ]; then
         _is_owner=true
-      elif ! kill -0 "$_owner_pid" 2>/dev/null; then
+      elif ! pid_alive "$_owner_pid"; then
         echo -n "$_my_pid" > "$OAUTH_OWNER"
         _is_owner=true
       fi
@@ -205,7 +258,8 @@ if [ -z "$FIVE_H" ]; then
       if [ -f "$_creds" ]; then
         _tok=$(jq -r '.claudeAiOauth.accessToken // empty' "$_creds" 2>/dev/null)
         if [ -n "$_tok" ]; then
-          (
+          # The fetch must finish before this statusline process exits.
+          {
             _resp=$(curl -s -m 3 -H "Authorization: Bearer $_tok" \
               "https://api.anthropic.com/api/oauth/usage" 2>/dev/null)
             if [ -n "$_resp" ]; then
@@ -215,15 +269,15 @@ if [ -z "$FIVE_H" ]; then
                 fetched_at: $t
               }' > "$USAGE_CACHE" 2>/dev/null
             fi
-          ) &
+          }
         fi
       fi
     fi
   fi
 
   if [ -f "$USAGE_CACHE" ]; then
-    FIVE_H=$(jq -r '.five_hour // empty' "$USAGE_CACHE" 2>/dev/null)
-    SEVEN_D=$(jq -r '.seven_day // empty' "$USAGE_CACHE" 2>/dev/null)
+    mapfile -d '' -t _usage < <(jq -j '[.five_hour // "", .seven_day // ""] | .[] | tostring, "\u0000"' "$USAGE_CACHE" 2>/dev/null)
+    FIVE_H=${_usage[0]} SEVEN_D=${_usage[1]}
   fi
 fi
 
@@ -245,36 +299,24 @@ if [ -n "$FIVE_H" ]; then
 fi
 
 _write_compute_cache() {
-  local _agents_json="[]"
-  if (( _ac > 0 )); then
-    _agents_json="["
+  {
+    printf '%s\0' "$_now" "$LINES_ADD" "$LINES_DEL" "$BRANCH" "$IN_GIT" \
+      "$CACHE_EPOCH" "$CACHE_TTL" "$SHELL_EPOCH" "$SHELL_DESC" "$SHELL_COUNT" "$ACTIVE_DIR" "$ACTIVE_BRANCH"
     for (( _i=0; _i<_ac; _i++ )); do
-      (( _i > 0 )) && _agents_json+=","
-      _agents_json+="{\"short\":$(printf '%s' "${_a_descs[$_i]}" | jq -Rs .)"
-      _agents_json+=",\"tokens\":${_a_toks[$_i]:-0}"
-      _agents_json+=",\"rate\":${_a_rates[$_i]:-null}"
-      _agents_json+=",\"model\":$(printf '%s' "${_a_models[$_i]}" | jq -Rs .)"
-      _agents_json+=",\"workflow\":$(printf '%s' "${_a_workflows[$_i]}" | jq -Rs .)"
-      _agents_json+=",\"subcount\":${_a_subcounts[$_i]:-0}"
-      _agents_json+=",\"phases\":$(printf '%s' "${_a_phases[$_i]:-[]}" | jq -Rc .)}"
+      printf '%s\0' "${_a_descs[_i]}" "${_a_toks[_i]}" "${_a_rates[_i]}" "${_a_models[_i]}" \
+        "${_a_workflows[_i]}" "${_a_subcounts[_i]}" "${_a_phases[_i]}"
     done
-    _agents_json+="]"
-  fi
-  local _has_agents=false
-  (( _ac > 0 )) && _has_agents=true
-  cat > "$COMPUTE_CACHE" <<CEOF
-{
-  "computed_at": $_now,
-  "has_agents": $_has_agents,
-  "lines_add": ${LINES_ADD:-0},
-  "lines_del": ${LINES_DEL:-0},
-  "branch": $(printf '%s' "$BRANCH" | jq -Rs .),
-  "in_git": $IN_GIT,
-  "cache_epoch": $CACHE_EPOCH,
-  "cache_ttl": $CACHE_TTL,
-  "agents": $_agents_json
-}
-CEOF
+  } | jq -Rs '
+    split("\u0000")[:-1] | . as $v |
+    {computed_at: ($v[0]|tonumber), lines_add: ($v[1]|tonumber), lines_del: ($v[2]|tonumber),
+     branch: $v[3], in_git: ($v[4] == "true"), cache_epoch: ($v[5]|tonumber), cache_ttl: ($v[6]|tonumber),
+     shell_epoch: ($v[7]|tonumber), shell_desc: $v[8], shell_count: ($v[9]|tonumber),
+     active_dir: $v[10], active_branch: $v[11], has_agents: (($v|length) > 12),
+     agents: [range(12; $v|length; 7) as $i |
+       {Short: $v[$i], Tokens: ($v[$i+1]|tonumber), Rate: ($v[$i+2]|tonumber? // null),
+        Model: $v[$i+3], Workflow: $v[$i+4], SubCount: ($v[$i+5]|tonumber),
+        Phases: ($v[$i+6]|fromjson|map({Title: .t, Done: .d, Total: .n}))}]}
+  ' > "$COMPUTE_CACHE"
 }
 
 if $_do_full; then
@@ -289,7 +331,7 @@ if $_do_full; then
     _do_gc=true
   else
     _gc_age=$(( _now - $(cat "$_gc_marker" 2>/dev/null | tr -d '[:space:]') ))
-    (( _gc_age > 300 )) && _do_gc=true
+    (( _gc_age >= 300 )) && _do_gc=true
   fi
   if $_do_gc; then
     echo -n "$_now" > "$_gc_marker"
@@ -297,7 +339,7 @@ if $_do_full; then
     for _sf in "$HOME/.claude/sessions/"*.json; do
       [ -f "$_sf" ] || continue
       _spid=$(jq -r '.pid // empty' "$_sf" 2>/dev/null)
-      [ -n "$_spid" ] && kill -0 "$_spid" 2>/dev/null && \
+      [ -n "$_spid" ] && pid_alive "$_spid" && \
         _live_sids="$_live_sids $(jq -r '.sessionId // empty' "$_sf" 2>/dev/null)"
     done
     for _stale in "$HOME/.claude/"\.sl_compute_* "$HOME/.claude/"\.sl_cache_* \
@@ -310,29 +352,7 @@ if $_do_full; then
     done
   fi
 
-  # Cheap fields from stdin JSON (instant)
-  LINES_ADD=$(echo "$input" | jq -r '.cost.total_lines_added // 0')
-  LINES_DEL=$(echo "$input" | jq -r '.cost.total_lines_removed // 0')
-
-  # Seed expensive fields from stale cache (or defaults)
-  CACHE_EPOCH=0; CACHE_TTL=300; BRANCH=""; IN_GIT=false
-  _ac=0; _a_descs=() _a_toks=() _a_rates=() _a_models=() _a_workflows=() _a_subcounts=() _a_phases=()
-  if [ -f "$COMPUTE_CACHE" ]; then
-    BRANCH=$(jq -r '.branch // empty' "$COMPUTE_CACHE" 2>/dev/null)
-    IN_GIT=$(jq -r '.in_git // false' "$COMPUTE_CACHE" 2>/dev/null)
-    CACHE_EPOCH=$(jq -r '.cache_epoch // 0' "$COMPUTE_CACHE" 2>/dev/null)
-    CACHE_TTL=$(jq -r '.cache_ttl // 300' "$COMPUTE_CACHE" 2>/dev/null)
-    _agent_count=$(jq -r '.agents | length // 0' "$COMPUTE_CACHE" 2>/dev/null)
-    for (( _i=0; _i<_agent_count; _i++ )); do
-      _a_descs+=($(jq -r ".agents[$_i].short // \"agent\"" "$COMPUTE_CACHE" 2>/dev/null))
-      _a_toks+=($(jq -r ".agents[$_i].tokens // 0" "$COMPUTE_CACHE" 2>/dev/null))
-      _a_rates+=($(jq -r ".agents[$_i].rate // empty" "$COMPUTE_CACHE" 2>/dev/null))
-      _a_models+=($(jq -r ".agents[$_i].model // empty" "$COMPUTE_CACHE" 2>/dev/null))
-      _a_workflows+=($(jq -r ".agents[$_i].workflow // empty" "$COMPUTE_CACHE" 2>/dev/null))
-      _a_subcounts+=($(jq -r ".agents[$_i].subcount // 0" "$COMPUTE_CACHE" 2>/dev/null))
-    done
-    _ac=${#_a_descs[@]}
-  fi
+  LINES_ADD=$_input_add LINES_DEL=$_input_del
 
   # Write partial cache immediately -- breaks the death loop
   _write_compute_cache
@@ -342,29 +362,24 @@ if $_do_full; then
   CACHE_MTIME="$HOME/.claude/.sl_mtime_${SESSION_ID}"
 
   if [ -f "$TRANSCRIPT" ]; then
-    _t_mtime=$(stat -c %Y "$TRANSCRIPT" 2>/dev/null || echo 0)
+    _t_mtime=$(stat -c %y "$TRANSCRIPT" 2>/dev/null || echo 0)
     _last_mtime=$(cat "$CACHE_MTIME" 2>/dev/null || echo 0)
     if [ "$_t_mtime" != "$_last_mtime" ]; then
-      result=$(tail -100 "$TRANSCRIPT" 2>/dev/null | jq -rs '
-        [.[] | select(
-          ((.message.usage.cache_read_input_tokens // 0) > 0) or
-          ((.message.usage.cache_creation_input_tokens // 0) > 0)
-        )] | last |
-        {
-          timestamp: (.timestamp // empty),
-          ttl: (if ((.message.usage.cache_creation.ephemeral_1h_input_tokens // 0) > 0)
-                then 3600 else 300 end)
-        }
-      ' 2>/dev/null)
-      if [ -n "$result" ]; then
-        iso=$(echo "$result" | jq -r '.timestamp // empty')
-        ttl=$(echo "$result" | jq -r '.ttl // 300')
-        if [ -n "$iso" ]; then
-          ts=$(date -d "$iso" +%s 2>/dev/null)
-          if [ -n "$ts" ]; then
-            CACHE_EPOCH=$ts; CACHE_TTL=$ttl
-            echo "$ts $ttl" > "$CACHE_STATE"
-          fi
+      # Parse bounded tails in one jq pass; ignore a partial first or last record.
+      mapfile -d '' -t _tail < <(tail -c 65536 "$TRANSCRIPT" 2>/dev/null | jq -Rjn --arg project "$PROJECT_DIR" '
+        [inputs | fromjson?] as $entries |
+        ([$entries[] | select(((.message.usage.cache_read_input_tokens // 0) > 0) or
+          ((.message.usage.cache_creation_input_tokens // 0) > 0))] | last) as $cache |
+        ([$entries[] | select(.gitBranch != null and .gitBranch != "" and .cwd != null and .cwd != $project)] | last) as $repo |
+        [$cache.timestamp // "", (if ($cache.message.usage.cache_creation.ephemeral_1h_input_tokens // 0) > 0
+          then 3600 else 300 end), $repo.cwd // "", $repo.gitBranch // ""]
+        | .[] | tostring, "\u0000"')
+      ACTIVE_DIR=${_tail[2]} ACTIVE_BRANCH=${_tail[3]}
+      if [ -n "${_tail[0]}" ]; then
+        ts=$(date -d "${_tail[0]}" +%s 2>/dev/null)
+        if [ -n "$ts" ]; then
+          CACHE_EPOCH=$ts CACHE_TTL=${_tail[1]}
+          printf '%s %s' "$CACHE_EPOCH" "$CACHE_TTL" > "$CACHE_STATE"
         fi
       fi
       echo "$_t_mtime" > "$CACHE_MTIME"
@@ -377,278 +392,179 @@ if $_do_full; then
     CACHE_TTL=${CACHE_TTL:-300}
   fi
 
+  # ── In-flight shell calls ──────────────────────────────
+  SHELL_EPOCH=0 SHELL_DESC="" SHELL_COUNT=0
+  if [ -f "$TRANSCRIPT" ]; then
+    mapfile -d '' -t _shell < <(tail -c 16384 "$TRANSCRIPT" 2>/dev/null | jq -Rjn '
+      [inputs | fromjson?] | reverse |
+      reduce .[] as $e ({done: {}, calls: [], found: false};
+        if .found then .
+        elif $e.message.role == "user" and ($e.message.content | type) == "array" then
+          reduce ($e.message.content[] | select(.type == "tool_result")) as $b (.; .done[$b.tool_use_id] = true)
+        elif $e.message.role == "assistant" and $e.message.content then
+          .found = true | .done as $done |
+          .timestamp = $e.timestamp |
+          .calls = [$e.message.content | arrays | .[] |
+            select(.type == "tool_use" and (.name == "Bash" or .name == "PowerShell") and ($done[.id] != true))]
+        else . end) |
+      [if (.calls|length) > 0 then .timestamp else "" end,
+       .calls[0].input.description // "", (.calls|length)] | .[] | tostring, "\u0000"')
+    if [ -n "${_shell[0]}" ]; then
+      SHELL_EPOCH=$(date -d "${_shell[0]}" +%s 2>/dev/null) SHELL_DESC=${_shell[1]} SHELL_COUNT=${_shell[2]}
+      SHELL_EPOCH=${SHELL_EPOCH:-0}
+    fi
+  fi
+
   # ── Git branch ─────────────────────────────────────────
   if [ -n "$PROJECT_DIR" ]; then
     BRANCH=$(git -C "$PROJECT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null)
     if [ -n "$BRANCH" ]; then IN_GIT=true; else BRANCH=""; IN_GIT=false; fi
   fi
 
+  if [ -n "$ACTIVE_BRANCH" ] && [ -n "$ACTIVE_DIR" ]; then
+    BRANCH=$ACTIVE_BRANCH IN_GIT=true
+  fi
+
   # ── Active agents (incremental parsing) ────────────────
   _ac=0
-  _a_descs=() _a_toks=() _a_rates=() _a_models=() _a_workflows=() _a_subcounts=()
-  if [ -n "$TRANSCRIPT" ]; then
-    _sa_dir="${TRANSCRIPT%.jsonl}/subagents"
-    _agent_cache="$HOME/.claude/.sl_agents_${SESSION_ID}"
-    if [ -d "$_sa_dir" ]; then
-      _agent_cache_dirty=false
-      for _mf in "$_sa_dir"/agent-*.meta.json; do
-        [ -f "$_mf" ] || continue
-        _jf="${_mf%.meta.json}.jsonl"
-        [ -f "$_jf" ] || continue
-        _fm=$(stat -c %Y "$_jf" 2>/dev/null || echo 0)
-        (( _now - _fm > 120 )) && continue
-        _desc=$(jq -r '.description // "agent"' "$_mf" 2>/dev/null)
-        _short=$(echo "$_desc" | awk '
-          BEGIN { split("a,an,the,and,or,but,not,nor,for,yet,so,with,from,except,into,about,after,before,during,without",sw,",") }
-          { n=NF; if(n>3)n=3
-            while(n>1) { w=tolower($n); ok=1; for(k in sw) if(w==sw[k]){ok=0;break}; if(ok)break; n-- }
-            for(i=1;i<=n;i++) printf "%s",(i>1?" ":"")$i
-          }')
+  _a_descs=() _a_toks=() _a_rates=() _a_models=() _a_workflows=() _a_subcounts=() _a_phases=()
+  _sa_dir="${TRANSCRIPT%.jsonl}/subagents"
+  _agent_cache="$HOME/.claude/.sl_agents_${SESSION_ID}"
+  if [ -n "$TRANSCRIPT" ] && [ -d "$_sa_dir" ]; then
+    declare -A _sizes=() _tokens=() _models=() _firsts=()
+    while IFS= read -r -d '' _key && IFS= read -r -d '' _size && IFS= read -r -d '' _tok &&
+          IFS= read -r -d '' _model && IFS= read -r -d '' _first; do
+      _sizes["$_key"]=$_size _tokens["$_key"]=$_tok _models["$_key"]=$_model _firsts["$_key"]=$_first
+    done < <(jq -j 'to_entries[] | [.key, .value.size, .value.tokens, .value.model, .value.first_ts]
+      | .[] | tostring, "\u0000"' "$_agent_cache" 2>/dev/null)
 
-        _jf_name=$(basename "$_jf")
-        _jf_size=$(stat -c %s "$_jf" 2>/dev/null || echo 0)
-
-        # Read per-agent cache: name size tokens model first_ts
-        _ca_size=0 _ca_tokens=0 _ca_model="" _ca_first_ts=""
-        if [ -f "$_agent_cache" ]; then
-          _ca_line=$(grep "^${_jf_name} " "$_agent_cache" 2>/dev/null)
-          if [ -n "$_ca_line" ]; then
-            read -r _ _ca_size _ca_tokens _ca_model _ca_first_ts <<< "$_ca_line"
-          fi
-        fi
-
-        if [ "$_jf_size" = "$_ca_size" ] && [ "$_ca_size" != "0" ]; then
-          _otok=$_ca_tokens
-          _model=$_ca_model
-          _first_ts_epoch=$_ca_first_ts
+    _agent_stats() {
+      local file=$1 key=$2 size=$3 offset=${_sizes[$2]:-0} prior=0 first=0 model=""
+      if (( size == offset && offset > 0 )); then
+        _otok=${_tokens[$key]} _model=${_models[$key]} _first_ts_epoch=${_firsts[$key]}
+      else
+        if (( size > offset && offset > 0 )); then
+          prior=${_tokens[$key]} first=${_firsts[$key]} model=${_models[$key]}
         else
-          if [ "$_jf_size" -gt "${_ca_size:-0}" ] 2>/dev/null && [ "${_ca_size:-0}" -gt 0 ]; then
-            # Incremental: read only new bytes, skip partial first line
-            _new_tokens=$(tail -c +$((_ca_size + 1)) "$_jf" 2>/dev/null | \
-              grep '"output_tokens"' | jq -s '[.[].message.usage.output_tokens // 0] | add // 0' 2>/dev/null)
-            _otok=$(( ${_ca_tokens:-0} + ${_new_tokens:-0} ))
-            _model=$_ca_model
-            _first_ts_epoch=$_ca_first_ts
-          else
-            # Full read (new file or truncated)
-            _otok=$(grep '"output_tokens"' "$_jf" 2>/dev/null | jq -s '[.[].message.usage.output_tokens // 0] | add // 0' 2>/dev/null)
-            _otok=${_otok:-0}
-            _first_ts=$(head -1 "$_jf" 2>/dev/null | jq -r '.timestamp // empty' 2>/dev/null)
-            _first_ts_epoch=""
-            if [ -n "$_first_ts" ]; then
-              _first_ts_epoch=$(date -d "$_first_ts" +%s 2>/dev/null)
-            fi
-            _model=$(grep -m1 '"assistant"' "$_jf" 2>/dev/null | jq -r '.message.model // empty' 2>/dev/null)
-            _model=$(echo "$_model" | sed 's/claude-//;s/-[0-9].*//;s/\b\(.\)/\u\1/')
-          fi
-          _agent_cache_dirty=true
-          # Update in-memory cache line (written after loop)
-          if [ -f "$_agent_cache" ]; then
-            grep -v "^${_jf_name} " "$_agent_cache" > "${_agent_cache}.tmp" 2>/dev/null || true
-            mv "${_agent_cache}.tmp" "$_agent_cache" 2>/dev/null
-          fi
-          echo "${_jf_name} ${_jf_size} ${_otok} ${_model:-unknown} ${_first_ts_epoch:-0}" >> "$_agent_cache"
+          offset=0
         fi
-
-        _arate=""
-        if [ -n "$_first_ts_epoch" ] && [ "$_first_ts_epoch" != "0" ]; then
-          _elapsed=$(( _now - _first_ts_epoch ))
-          if (( _elapsed >= 10 )); then
-            _arate=$(awk "BEGIN { printf \"%.0f\", $_otok / ($_elapsed / 60.0) }")
-          fi
+        local stats=() iso
+        mapfile -d '' -t stats < <(tail -c +$(( offset + 1 )) "$file" 2>/dev/null | jq -Rjn \
+          --argjson prior "$prior" --arg model "$model" '
+          reduce (inputs | fromjson?) as $e ({tokens: $prior, model: $model, first: ""};
+            .tokens += ($e.message.usage.output_tokens // 0) |
+            if .model == "" then .model = ($e.message.model // "") else . end |
+            if .first == "" then .first = ($e.timestamp // "") else . end) |
+          [.tokens, .model, .first] | .[] | tostring, "\u0000"')
+        _otok=${stats[0]:-0} _model=${stats[1]} _first_ts_epoch=$first
+        _model=${_model#claude-}; _model=${_model%%-[0-9]*}; _model=${_model^}
+        if (( first == 0 )) && [ -n "${stats[2]}" ]; then
+          _first_ts_epoch=$(date -d "${stats[2]}" +%s 2>/dev/null)
+          _first_ts_epoch=${_first_ts_epoch:-0}
         fi
-        _a_descs+=("$_short")
-        _a_toks+=("$_otok")
-        _a_rates+=("$_arate")
-        _a_models+=("$_model")
-        _a_workflows+=("")
-        _a_subcounts+=(0)
-        _a_phases+=("[]")
-      done
-
-      # ── Workflow subagents (subagents/workflows/wf_*/) ──
-      _wf_dir="$_sa_dir/workflows"
-      if [ -d "$_wf_dir" ]; then
-        _session_dir="${TRANSCRIPT%.jsonl}"
-        _script_dir="$_session_dir/workflows/scripts"
-        for _wf_folder in "$_wf_dir"/wf_*/; do
-          [ -d "$_wf_folder" ] || continue
-          _wf_id=$(basename "$_wf_folder")
-          _wf_name="$_wf_id"
-          if [ -d "$_script_dir" ]; then
-            _script_match=$(ls "$_script_dir"/*-"${_wf_id}.js" 2>/dev/null | head -1)
-            if [ -n "$_script_match" ]; then
-              _wf_name=$(basename "$_script_match" | sed "s/-${_wf_id}\\.js$//")
-            fi
-          fi
-
-          # Phase detection: try state JSON (completed), fall back to script+journal (running)
-          _wf_phase_json="[]"
-          _wf_state_file="$_session_dir/workflows/${_wf_id}.json"
-          if [ -f "$_wf_state_file" ]; then
-            _wf_phase_json=$(jq -c '
-              (.phases // []) as $ph |
-              if ($ph | length) == 0 then [] else
-                [(.workflowProgress // []) | group_by(.phaseTitle) | .[] |
-                  {t: .[0].phaseTitle, n: length, d: [.[] | select(.state == "done")] | length}
-                ] | [($ph | .[].title) as $t | {t: $t, n: 0, d: 0}] as $empty |
-                reduce ($empty[] + .[]) as $x ({}; .[$x.t].t = $x.t | .[$x.t].n += $x.n | .[$x.t].d += $x.d) |
-                [($ph | .[].title) as $t | .[$t] // {t: $t, n: 0, d: 0}]
-              end
-            ' "$_wf_state_file" 2>/dev/null)
-            _sn=$(jq -r '.workflowName // empty' "$_wf_state_file" 2>/dev/null)
-            [ -n "$_sn" ] && _wf_name="$_sn"
-          fi
-          if [ "$_wf_phase_json" = "[]" ] || [ -z "$_wf_phase_json" ]; then
-            _wf_script=$(ls "$_script_dir"/*-"${_wf_id}.js" 2>/dev/null | head -1)
-            if [ -n "$_wf_script" ]; then
-              _wf_phase_titles=$(sed -n "s/.*{ *title: *['\"]\\([^'\"]*\\)['\"].*/\\1/p" "$_wf_script" 2>/dev/null)
-              if [ -n "$_wf_phase_titles" ]; then
-                _journal="$_wf_folder/journal.jsonl"
-                if [ -f "$_journal" ]; then
-                  _wf_phase_json=$(awk -v titles="$_wf_phase_titles" '
-                    BEGIN {
-                      n = split(titles, ph, "\n")
-                      for (i=1; i<=n; i++) { cnt[ph[i]]=0; done[ph[i]]=0; order[i]=ph[i] }
-                      pidx=1; seen_result=0
-                    }
-                    {
-                      if (match($0, /"type":"started".*"agentId":"([^"]+)"/, m)) {
-                        if (seen_result && pidx < n) { pidx++; seen_result=0 }
-                        cnt[order[pidx]]++
-                        agent_ph[m[1]] = order[pidx]
-                      }
-                      if (match($0, /"type":"result".*"agentId":"([^"]+)"/, m)) {
-                        seen_result=1
-                        if (m[1] in agent_ph) done[agent_ph[m[1]]]++
-                      }
-                    }
-                    END {
-                      printf "["
-                      for (i=1; i<=n; i++) {
-                        if (i>1) printf ","
-                        gsub(/"/, "\\\"", order[i])
-                        printf "{\"t\":\"%s\",\"n\":%d,\"d\":%d}", order[i], cnt[order[i]], done[order[i]]
-                      }
-                      printf "]"
-                    }
-                  ' "$_journal" 2>/dev/null)
-                fi
-              fi
-            fi
-          fi
-          [ -z "$_wf_phase_json" ] && _wf_phase_json="[]"
-
-          _wf_total_tok=0 _wf_first_ts="" _wf_last_write=0 _wf_sub_count=0 _wf_model=""
-          for _wjf in "$_wf_folder"agent-*.jsonl; do
-            [ -f "$_wjf" ] || continue
-            _wjf_write=$(stat -c %Y "$_wjf" 2>/dev/null || echo 0)
-            (( _wjf_write > _wf_last_write )) && _wf_last_write=$_wjf_write
-            (( _wf_sub_count++ ))
-
-            _wjf_name=$(basename "$_wjf")
-            _ck="${_wf_id}/${_wjf_name}"
-            _wjf_size=$(stat -c %s "$_wjf" 2>/dev/null || echo 0)
-
-            _ca_size=0 _ca_tokens=0 _ca_model="" _ca_first_ts=""
-            if [ -f "$_agent_cache" ]; then
-              _ca_line=$(grep "^${_ck} " "$_agent_cache" 2>/dev/null)
-              if [ -n "$_ca_line" ]; then
-                read -r _ _ca_size _ca_tokens _ca_model _ca_first_ts <<< "$_ca_line"
-              fi
-            fi
-
-            if [ "$_wjf_size" = "$_ca_size" ] && [ "$_ca_size" != "0" ]; then
-              _wf_total_tok=$(( _wf_total_tok + _ca_tokens ))
-              [ -z "$_wf_model" ] && [ -n "$_ca_model" ] && _wf_model="$_ca_model"
-              if [ -n "$_ca_first_ts" ] && [ "$_ca_first_ts" != "0" ]; then
-                [ -z "$_wf_first_ts" ] && _wf_first_ts="$_ca_first_ts"
-                (( _ca_first_ts < _wf_first_ts )) && _wf_first_ts="$_ca_first_ts"
-              fi
-            else
-              _sub_tok=0 _sub_first_ts="" _sub_model=""
-              if [ "$_wjf_size" -gt "${_ca_size:-0}" ] 2>/dev/null && [ "${_ca_size:-0}" -gt 0 ]; then
-                _new_tok=$(tail -c +$((_ca_size + 1)) "$_wjf" 2>/dev/null | \
-                  grep '"output_tokens"' | jq -s '[.[].message.usage.output_tokens // 0] | add // 0' 2>/dev/null)
-                _sub_tok=$(( ${_ca_tokens:-0} + ${_new_tok:-0} ))
-                _sub_model="$_ca_model"
-                _sub_first_ts="$_ca_first_ts"
-              else
-                _sub_tok=$(grep '"output_tokens"' "$_wjf" 2>/dev/null | jq -s '[.[].message.usage.output_tokens // 0] | add // 0' 2>/dev/null)
-                _sub_tok=${_sub_tok:-0}
-                _ts=$(head -1 "$_wjf" 2>/dev/null | jq -r '.timestamp // empty' 2>/dev/null)
-                [ -n "$_ts" ] && _sub_first_ts=$(date -d "$_ts" +%s 2>/dev/null)
-                _sub_model=$(grep -m1 '"assistant"' "$_wjf" 2>/dev/null | jq -r '.message.model // empty' 2>/dev/null)
-                _sub_model=$(echo "$_sub_model" | sed 's/claude-//;s/-[0-9].*//;s/\b\(.\)/\u\1/')
-              fi
-              _agent_cache_dirty=true
-              if [ -f "$_agent_cache" ]; then
-                grep -v "^${_ck} " "$_agent_cache" > "${_agent_cache}.tmp" 2>/dev/null || true
-                mv "${_agent_cache}.tmp" "$_agent_cache" 2>/dev/null
-              fi
-              echo "${_ck} ${_wjf_size} ${_sub_tok} ${_sub_model:-unknown} ${_sub_first_ts:-0}" >> "$_agent_cache"
-              _wf_total_tok=$(( _wf_total_tok + _sub_tok ))
-              [ -z "$_wf_model" ] && [ -n "$_sub_model" ] && _wf_model="$_sub_model"
-              if [ -n "$_sub_first_ts" ] && [ "$_sub_first_ts" != "0" ]; then
-                [ -z "$_wf_first_ts" ] && _wf_first_ts="$_sub_first_ts"
-                (( _sub_first_ts < _wf_first_ts )) && _wf_first_ts="$_sub_first_ts"
-              fi
-            fi
-          done
-
-          (( _wf_sub_count == 0 )) && continue
-          (( _now - _wf_last_write > 120 )) && continue
-
-          _wf_rate=""
-          if [ -n "$_wf_first_ts" ] && [ "$_wf_first_ts" != "0" ]; then
-            _elapsed=$(( _now - _wf_first_ts ))
-            if (( _elapsed >= 10 )); then
-              _wf_rate=$(awk "BEGIN { printf \"%.0f\", $_wf_total_tok / ($_elapsed / 60.0) }")
-            fi
-          fi
-
-          _a_descs+=("$_wf_name")
-          _a_toks+=("$_wf_total_tok")
-          _a_rates+=("$_wf_rate")
-          _a_models+=("$_wf_model")
-          _a_workflows+=("$_wf_id")
-          _a_subcounts+=("$_wf_sub_count")
-          _a_phases+=("$_wf_phase_json")
-        done
+        _sizes["$key"]=$size _tokens["$key"]=$_otok _models["$key"]=$_model _firsts["$key"]=$_first_ts_epoch
       fi
+      _arate=""
+      if (( _first_ts_epoch > 0 && _now - _first_ts_epoch >= 10 )); then
+        round_ratio "$(( _otok * 60 ))" "$(( _now - _first_ts_epoch ))"
+        _arate=$REPLY
+      fi
+    }
 
-      _ac=${#_a_descs[@]}
+    for _mf in "$_sa_dir"/agent-*.meta.json; do
+      [ -f "$_mf" ] || continue
+      _jf="${_mf%.meta.json}.jsonl"
+      read -r _size _mtime < <(stat -c '%s %Y' "$_jf" 2>/dev/null)
+      [ -n "$_mtime" ] || continue
+      (( _now - _mtime > 120 )) && continue
+      _short=$(jq -r '
+        (.description | if . == null or . == "" then "agent" else . end |
+          [splits("\\s+") | select(length > 0)][:3]) |
+        ["a","an","the","and","or","but","not","nor","for","yet","so",
+         "with","from","except","into","about","after","before","during","without"] as $stop |
+        until(length <= 1 or ((.[-1] | ascii_downcase) as $word | ($stop | index($word)) == null); .[:-1]) |
+        join(" ")' "$_mf" 2>/dev/null) || continue
+      _agent_stats "$_jf" "${_jf##*/}" "$_size"
+      _a_descs+=("$_short") _a_toks+=("$_otok") _a_rates+=("$_arate") _a_models+=("$_model")
+      _a_workflows+=("") _a_subcounts+=(0) _a_phases+=("[]")
+    done
+
+    _session_dir="${TRANSCRIPT%.jsonl}"
+    _script_dir="$_session_dir/workflows/scripts"
+    for _wf_folder in "$_sa_dir"/workflows/wf_*; do
+      [ -d "$_wf_folder" ] || continue
+      _wf_id=${_wf_folder##*/} _wf_script=""
+      _wf_total_tok=0 _wf_first_ts=0 _wf_last_write=0 _wf_sub_count=0 _wf_model=""
+      for _wjf in "$_wf_folder"/agent-*.jsonl; do
+        [ -f "$_wjf" ] || continue
+        read -r _size _mtime < <(stat -c '%s %Y' "$_wjf" 2>/dev/null)
+        (( _mtime > _wf_last_write )) && _wf_last_write=$_mtime
+        (( _wf_sub_count++ ))
+        _agent_stats "$_wjf" "${_wf_id}/${_wjf##*/}" "$_size"
+        (( _wf_total_tok += _otok ))
+        [ -z "$_wf_model" ] && _wf_model=$_model
+        if (( _first_ts_epoch > 0 && (_wf_first_ts == 0 || _first_ts_epoch < _wf_first_ts) )); then
+          _wf_first_ts=$_first_ts_epoch
+        fi
+      done
+      (( _wf_sub_count == 0 || _now - _wf_last_write > 120 )) && continue
+      _wf_name=$_wf_id
+      for _match in "$_script_dir"/*-"${_wf_id}.js"; do
+        [ -f "$_match" ] || continue
+        _wf_script=$_match _wf_name=${_match##*/}
+        _wf_name=${_wf_name%-"${_wf_id}.js"}
+        break
+      done
+      # State and journal are parsed once per workflow, including every phase.
+      mapfile -d '' -t _wf_info < <(
+        { printf '%s\0' "$(cat "$_session_dir/workflows/${_wf_id}.json" 2>/dev/null)" \
+            "$(cat "$_wf_script" 2>/dev/null)" "$(cat "$_wf_folder/journal.jsonl" 2>/dev/null)"; } |
+        jq -Rjs --arg name "$_wf_name" '
+          split("\u0000") as $v | (try ($v[0]|fromjson) catch {}) as $state |
+          (if ($state.workflowName // "") != "" then $state.workflowName else $name end),
+          (if ($state.phases|length) > 0 and ($state.workflowProgress|length) > 0 then
+            [$state.phases[].title as $title |
+              [$state.workflowProgress[] | select(.type == "workflow_agent" and .phaseTitle == $title)] as $agents |
+              {t: $title, n: ($agents|length), d: ([$agents[]|select(.state == "done")]|length)}]
+          else
+            ([try ($v[1] | capture("phases\\s*:\\s*\\[(?<ph>.*?)\\]"; "m").ph |
+              scan("title\\s*:\\s*[\"\u0027]([^\"\u0027]+)[\"\u0027]") | .[0]) catch empty]) as $titles |
+            if ($titles|length) == 0 then [] else
+              reduce ($v[2]|split("\n")[]|fromjson?) as $e
+                ({idx: 0, seen: false, agents: {}, done: {}, counts: {}};
+                if $e.type == "started" and $e.agentId then
+                  if .seen and .idx < ($titles|length) - 1 then .idx += 1 | .seen = false else . end |
+                  .agents[$e.agentId] = $titles[.idx] | .counts[$titles[.idx]] += 1
+                elif $e.type == "result" then
+                  .seen = true | if $e.agentId then .done[$e.agentId] = true else . end
+                else . end) as $journal |
+              [$titles[] as $t | {t: $t, n: ($journal.counts[$t] // 0),
+                d: ([$journal.done|keys[]|select($journal.agents[.] == $t)]|length)}]
+            end
+          end | tojson) | ., "\u0000"')
+      _wf_rate=""
+      if (( _wf_first_ts > 0 && _now - _wf_first_ts >= 10 )); then
+        round_ratio "$(( _wf_total_tok * 60 ))" "$(( _now - _wf_first_ts ))"
+        _wf_rate=$REPLY
+      fi
+      _a_descs+=("${_wf_info[0]}") _a_toks+=("$_wf_total_tok") _a_rates+=("$_wf_rate") _a_models+=("$_wf_model")
+      _a_workflows+=("$_wf_id") _a_subcounts+=("$_wf_sub_count") _a_phases+=("${_wf_info[1]:-[]}")
+    done
+    _ac=${#_a_descs[@]}
+    if (( ${#_sizes[@]} > 0 )); then
+      {
+        for _key in "${!_sizes[@]}"; do
+          printf '%s\0' "$_key" "${_sizes[$_key]}" "${_tokens[$_key]}" "${_models[$_key]}" "${_firsts[$_key]}"
+        done
+      } | jq -Rs 'split("\u0000")[:-1] | . as $v | [range(0; length; 5) as $i |
+        {key: $v[$i], value: {size: ($v[$i+1]|tonumber), tokens: ($v[$i+2]|tonumber),
+          model: $v[$i+3], first_ts: ($v[$i+4]|tonumber)}}] | from_entries' > "$_agent_cache"
     fi
   fi
 
   # ── Write full cache (overwrites partial) ──────────────
   _write_compute_cache
 
-else
-  # ══════════════════════════════════════════════════════
-  # CHEAP TICK — read cached values
-  # ══════════════════════════════════════════════════════
-
-  LINES_ADD=$(jq -r '.lines_add // 0' "$COMPUTE_CACHE" 2>/dev/null)
-  LINES_DEL=$(jq -r '.lines_del // 0' "$COMPUTE_CACHE" 2>/dev/null)
-  BRANCH=$(jq -r '.branch // empty' "$COMPUTE_CACHE" 2>/dev/null)
-  IN_GIT=$(jq -r '.in_git // false' "$COMPUTE_CACHE" 2>/dev/null)
-  CACHE_EPOCH=$(jq -r '.cache_epoch // 0' "$COMPUTE_CACHE" 2>/dev/null)
-  CACHE_TTL=$(jq -r '.cache_ttl // 300' "$COMPUTE_CACHE" 2>/dev/null)
-
-  _ac=0
-  _a_descs=() _a_toks=() _a_rates=() _a_models=() _a_workflows=() _a_subcounts=() _a_phases=()
-  _agent_count=$(jq -r '.agents | length // 0' "$COMPUTE_CACHE" 2>/dev/null)
-  for (( _i=0; _i<_agent_count; _i++ )); do
-    _a_descs+=($(jq -r ".agents[$_i].short // \"agent\"" "$COMPUTE_CACHE" 2>/dev/null))
-    _a_toks+=($(jq -r ".agents[$_i].tokens // 0" "$COMPUTE_CACHE" 2>/dev/null))
-    _a_rates+=($(jq -r ".agents[$_i].rate // empty" "$COMPUTE_CACHE" 2>/dev/null))
-    _a_models+=($(jq -r ".agents[$_i].model // empty" "$COMPUTE_CACHE" 2>/dev/null))
-    _a_workflows+=($(jq -r ".agents[$_i].workflow // empty" "$COMPUTE_CACHE" 2>/dev/null))
-    _a_subcounts+=($(jq -r ".agents[$_i].subcount // 0" "$COMPUTE_CACHE" 2>/dev/null))
-    _a_phases+=($(jq -rc ".agents[$_i].phases // []" "$COMPUTE_CACHE" 2>/dev/null))
-  done
-  _ac=${#_a_descs[@]}
 fi
 
 # ── Cache countdown (computed from epoch every tick) ─────
@@ -663,12 +579,14 @@ if (( CACHE_EPOCH > 0 )); then
     else
       CACHE_REMAINING="${_sec}s"
     fi
-    CACHE_ELAPSED_PCT=$(( 100 - (_remain * 100 / CACHE_TTL) ))
+    round_ratio "$(( _remain * 100 ))" "$CACHE_TTL"
+    CACHE_ELAPSED_PCT=$(( 100 - REPLY ))
   fi
 fi
 
 # ── Build output ─────────────────────────────────────────
 SEG_MODEL=""
+CTX_INT=${CTX_SIZE%.*}
 
 if [ -n "$MODEL" ]; then
   MODEL_STR="${MODEL/ (1M context)/}"
@@ -679,7 +597,10 @@ if [ -n "$MODEL" ]; then
 fi
 
 SEG_PROJECT=""
-PROJ=$(basename "$PROJECT_DIR" 2>/dev/null)
+DISPLAY_DIR=$PROJECT_DIR
+[ -n "$ACTIVE_BRANCH" ] && [ -n "$ACTIVE_DIR" ] && DISPLAY_DIR=$ACTIVE_DIR
+DISPLAY_DIR=${DISPLAY_DIR//\\//}; DISPLAY_DIR=${DISPLAY_DIR%/}
+PROJ=${DISPLAY_DIR##*/}
 if [ -n "$PROJ" ]; then
   if [ "$IN_GIT" = "true" ]; then
     SEG_PROJECT="${C_PROJ}🟢 📁 ${PROJ}"
@@ -698,14 +619,31 @@ if [ "$IN_GIT" = "true" ] && (( LADD > 0 || LDEL > 0 )); then
   SEG_DIFF="${C_ADD}+${LADD}${C_DEL}/-${LDEL}"
 fi
 
-CTX_P=$(awk "BEGIN { print int($CTX_PCT+0.5) }")
+SEG_SHELL="" SHELL_SHORT=""
+if (( SHELL_EPOCH > 0 && SHELL_COUNT > 0 && _now - SHELL_EPOCH >= 3 )); then
+  _shell_sec=$(( _now - SHELL_EPOCH ))
+  if (( _shell_sec >= 60 )); then
+    _shell_elapsed="$(( _shell_sec / 60 ))m$(( _shell_sec % 60 ))s"
+  else
+    _shell_elapsed="${_shell_sec}s"
+  fi
+  SHELL_SHORT="${C_SHELL}⏳ ${_shell_elapsed}"
+  (( SHELL_COUNT > 1 )) && SHELL_SHORT+=" ${C_DIM}×${SHELL_COUNT}"
+  SEG_SHELL=$SHELL_SHORT
+  _desc_trunc=${SHELL_DESC//$'\n'/ }; _desc_trunc=${_desc_trunc//$'\r'/ }
+  if (( ${#_desc_trunc} > 30 )); then _desc_trunc="${_desc_trunc:0:27}..."; fi
+  [ -n "$_desc_trunc" ] && SEG_SHELL+=" ${C_DIM}${_desc_trunc}"
+fi
+
+CTX_P=$(awk "BEGIN { printf \"%.0f\", $CTX_PCT }")
 CTX_USED=$(awk "BEGIN { printf \"%.0f\", $CTX_SIZE * $CTX_PCT / 100 }")
 U_FMT=$(fmt_tok "${CTX_USED}")
 SEG_CTX="${C_GRAY}${U_FMT} $(make_bar "$CTX_PCT" 8) $(pct_color "$CTX_PCT")${CTX_P}%"
+SEG_CTX_SHORT="${C_GRAY}${U_FMT} $(pct_color "$CTX_PCT")${CTX_P}%"
 
 SEG_5H="" SEG_5H_MID="" SEG_5H_SHORT=""
 if [ -n "$FIVE_H" ]; then
-  P5=$(awk "BEGIN { print int($FIVE_H+0.5) }")
+  P5=$(awk "BEGIN { printf \"%.0f\", $FIVE_H }")
   RATE=$(_calc_rate "$FIVE_H")
   RATE_STR=""
   if [ -n "$RATE" ] && [ "$RATE" != "0" ]; then
@@ -723,7 +661,7 @@ fi
 
 SEG_7D="" SEG_7D_SHORT=""
 if [ -n "$SEVEN_D" ]; then
-  PW=$(awk "BEGIN { print int($SEVEN_D+0.5) }")
+  PW=$(awk "BEGIN { printf \"%.0f\", $SEVEN_D }")
   SEG_7D="${C_GRAY}7d $(make_bar "$SEVEN_D" 8) $(pct_color "$SEVEN_D")${PW}%"
   SEG_7D_SHORT="${C_GRAY}7d: $(pct_color "$SEVEN_D")${PW}%"
 fi
@@ -780,33 +718,31 @@ _1m_removed=false
 if _over && [ -n "$SEG_CACHE" ]; then
   SEG_CACHE="$(pct_color "$CACHE_ELAPSED_PCT")${CACHE_REMAINING}"
 fi
-# 2. [1M] removed
+# 2. Shell description removed
+if _over && [ -n "$SEG_SHELL" ]; then SEG_SHELL=$SHELL_SHORT; fi
+# 3. [1M] removed
 if _over && (( CTX_INT >= 1000000 )); then
   _1m_removed=true
   _rebuild_bars
 fi
-# 3-6. bars squeeze 8->7->6->5->4
+# 4-7. bars squeeze 8->7->6->5->4
 for _target_bw in 7 6 5 4; do
   if _over && (( _cur_bar > _target_bw )); then
     _cur_bar=$_target_bw
     _rebuild_bars
   fi
 done
-# 7. 5h rate drop
+# 8. 5h rate drop
 if _over && [ -n "$SEG_5H" ] && [ -n "$FIVE_H" ]; then
   _rate_dropped=true
   SEG_5H="${C_GRAY}5h $(make_bar "$FIVE_H" "$_cur_bar") $(pct_color "$FIVE_H")${P5}%"
 fi
-# 8. 7d -> text
-if _over && [ -n "$SEG_7D" ]; then
-  SEG_7D="$SEG_7D_SHORT"
+# 9. All bars become text together
+if _over; then
+  SEG_CTX=$SEG_CTX_SHORT SEG_5H=$SEG_5H_SHORT SEG_7D=$SEG_7D_SHORT
 fi
-# 9. 7d remove
+# 10. 7d remove
 if _over; then SEG_7D=""; fi
-# 10. 5h -> text
-if _over && [ -n "$SEG_5H" ]; then
-  SEG_5H="$SEG_5H_SHORT"
-fi
 # 11. 5h remove
 if _over; then SEG_5H=""; fi
 
@@ -848,20 +784,30 @@ if (( _ac > 0 )); then
       _header+=" ${C_DIM}(${_reg_models[0]})"
     fi
     _header+="${C_DIM}:"
-    _parts=""
+    _header_len=$(vis_len "$_header")
+    printf -v _indent '%*s' "$_header_len" ''
+    _cur_line=$_header
     for (( _i=0; _i<_reg_count; _i++ )); do
-      (( _i > 0 )) && _parts+="${C_GRAY},"
       _tf=$(fmt_tok "${_reg_toks[$_i]}")
-      _parts+=" ${C_GRAY}${_reg_descs[$_i]} ${C_MODEL}${_tf}"
+      _part=" ${C_GRAY}${_reg_descs[$_i]} ${C_MODEL}${_tf}"
       if [ -n "${_reg_rates[$_i]}" ] && [ "${_reg_rates[$_i]}" != "0" ]; then
         _rf=$(awk "BEGIN { n=${_reg_rates[$_i]}; if(n>=1000) printf \"%.0fk\", n/1000; else printf \"%.0f\", n }")
-        _parts+=" $(agent_rate_color "${_reg_rates[$_i]}")${_rf}/m"
+        _part+=" $(agent_rate_color "${_reg_rates[$_i]}")${_rf}/m"
       fi
       if ! $_all_same && [ -n "${_reg_models[$_i]}" ]; then
-        _parts+=" ${C_DIM}(${_reg_models[$_i]})"
+        _part+=" ${C_DIM}(${_reg_models[$_i]})"
+      fi
+      _candidate=$_cur_line
+      (( _i > 0 )) && _candidate+="${C_GRAY},"
+      _candidate+=$_part
+      if (( _i > 0 && $(vis_len "$_candidate") > MAX_W )); then
+        AGENTS_LINE+="${_cur_line}${C_GRAY},"$'\n'
+        _cur_line="${_indent}${_part}"
+      else
+        _cur_line=$_candidate
       fi
     done
-    AGENTS_LINE="${_header}${_parts}"
+    AGENTS_LINE+=$_cur_line
   fi
 
   for (( _i=0; _i<_wf_count; _i++ )); do
@@ -872,29 +818,44 @@ if (( _ac > 0 )); then
       _wl+=" $(agent_rate_color "${_wf_rates[$_i]}")${_rf}/m"
     fi
     [ -n "${_wf_models[$_i]}" ] && _wl+=" ${C_DIM}(${_wf_models[$_i]})"
-    WORKFLOW_LINES+=$'\n'"${_wl}"
+    WORKFLOW_LINES+=$'\n'"${_wl}${RST}"
 
     _pj="${_wf_phases[$_i]}"
     if [ -n "$_pj" ] && [ "$_pj" != "[]" ]; then
-      _phase_line="   "
-      _pn=$(echo "$_pj" | jq -r 'length' 2>/dev/null)
-      for (( _pi=0; _pi<_pn; _pi++ )); do
-        _pt=$(echo "$_pj" | jq -r ".[$_pi].t" 2>/dev/null)
-        _pd=$(echo "$_pj" | jq -r ".[$_pi].d" 2>/dev/null)
-        _pc=$(echo "$_pj" | jq -r ".[$_pi].n" 2>/dev/null)
-        (( _pi > 0 )) && _phase_line+="  "
+      _phase_line=""
+      while IFS= read -r -d '' _pt && IFS= read -r -d '' _pd && IFS= read -r -d '' _pc; do
+        [ -n "$_phase_line" ] && _phase_line+="  "
         _phase_line+="${C_DIM}${_pt} ${C_GRAY}${_pd}/${_pc}"
-        if (( _pc > 0 && _pd == _pc )); then
-          _phase_line+=" $(fg 152 195 121)✓"
-        fi
-      done
-      WORKFLOW_LINES+=$'\n'"${_phase_line}"
+        if (( _pd == _pc )); then _phase_line+=" ${C_ADD}✓"; fi
+      done < <(printf '%s' "$_pj" | jq -j '.[] | select(.n > 0) | [.t, .d, .n] | .[] | tostring, "\u0000"')
+      [ -n "$_phase_line" ] && WORKFLOW_LINES+=$'\n'"   ${_phase_line}${RST}"
     fi
   done
 fi
 
+# ── Resume command ───────────────────────────────────────
+RESUME_LINE=""
+if $SHOW_RESUME_LINE && [ -n "$RESUME_SESSION_ID" ]; then
+  printf -v _resume_sid '%q' "$RESUME_SESSION_ID"
+  RESUME_LINE="claude --resume $_resume_sid"
+  if [[ $PROJECT_DIR =~ ^[A-Za-z]:\\ ]]; then
+    RESUME_LINE="cmd /c \"cd /d $PROJECT_DIR && $RESUME_LINE\""
+  elif [ -n "$PROJECT_DIR" ]; then
+    # Quote shell metacharacters too, so the command can be pasted safely.
+    printf -v _resume_dir '%q' "$PROJECT_DIR"
+    RESUME_LINE="cd $_resume_dir && $RESUME_LINE"
+  fi
+fi
+
 # ── Output ───────────────────────────────────────────────
+_spinner=✦
+if (( SHELL_COUNT > 0 || _ac > 0 )); then
+  _frames=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
+  _spinner=${_frames[(_now / REFRESH_INTERVAL) % ${#_frames[@]}]}
+fi
+printf '\033]0;%s %s | %s\007' "$_spinner" "${PROJ:-claude}" "${RESUME_SESSION_ID:0:8}"
 printf '%s%s' "$OUT" "$RST"
+[ -n "$RESUME_LINE" ] && printf '\n%s%s%s' "$C_DIM" "$RESUME_LINE" "$RST"
 [ -n "$AGENTS_LINE" ] && printf '\n%s%s' "$AGENTS_LINE" "$RST"
-[ -n "$WORKFLOW_LINES" ] && printf '%s%s' "$WORKFLOW_LINES" "$RST"
+[ -n "$WORKFLOW_LINES" ] && printf '%s' "$WORKFLOW_LINES"
 exit 0

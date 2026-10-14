@@ -5,12 +5,16 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT="$SCRIPT_DIR/statusline.sh"
+TEST_HOME=$(mktemp -d) || exit 1
+trap 'rm -rf -- "$TEST_HOME"' EXIT
+export HOME=$TEST_HOME
 CLAUDE_DIR="$HOME/.claude"
+mkdir -p "$CLAUDE_DIR"
 
-strip_ansi() { sed 's/\x1b\[[0-9;]*m//g'; }
+strip_ansi() { sed 's/\x1b\]0;[^\x07]*\x07//g;s/\x1b\[[0-9;]*m//g'; }
 vis_len() {
   printf '%s' "$1" | strip_ansi \
-    | sed 's/▓/X/g;s/░/X/g;s/📁/X/g;s/🟢/XX/g;s/⚪/XX/g;s/↑/X/g;s/↓/X/g;s/→/X/g;s/✓/X/g' | wc -c
+    | LC_ALL=C sed 's/▓/X/g;s/░/X/g;s/📁/XX/g;s/🟢/XX/g;s/⚪/XX/g;s/↑/X/g;s/↓/X/g;s/→/X/g;s/✓/X/g' | wc -c
 }
 
 NOW=$(date +%s)
@@ -179,6 +183,15 @@ for pair in "Workflow line present:$has_wf" "Find phase shown:$has_find" "Verify
     (( failures++ ))
   fi
 done
+
+# The same phase breakdown must survive a cheap tick through the compute cache.
+wf_tick=$(echo "$wf_json" | bash "$wf_tmp" 2>/dev/null | strip_ansi)
+if [[ "$wf_tick" == *"Find 3/3 ✓  Verify 1/2"* ]]; then
+  echo "Cached workflow phases [PASS]"
+else
+  echo "Cached workflow phases [FAIL]"
+  (( failures++ ))
+fi
 
 rm -f "$wf_tmp" "$CLAUDE_DIR/.sl_compute_$wf_sid" "$CLAUDE_DIR/.sl_agents_$wf_sid"
 rm -rf "$CLAUDE_DIR/projects/test-wf-session" "$wf_transcript"

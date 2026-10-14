@@ -12,7 +12,7 @@ Custom Claude Code status bar rendered by a hook in `~/.claude/settings.json`:
 ## Files
 
 - `statusline.ps1` — PowerShell 7 implementation (primary, Windows)
-- `statusline.sh` — Bash implementation (secondary, not kept in sync; see Parity section)
+- `statusline.sh` — Bash implementation for Linux and Git Bash; see Parity section
 - `test_cascade.ps1` — test harness for collapse cascade and timer formatting
 - `sl_test.ps1` — additional test harness
 - `statusline.png` — reference screenshot
@@ -40,7 +40,7 @@ Full compute (transcript parsing, git branch, agent scanning) runs every `$FULL_
 
 Edit `$SEGMENT_ORDER` near the top of `statusline.ps1`, or `SEGMENT_ORDER`
 in `statusline.sh`. Move names to reorder the main row. Omit a name to hide it.
-PowerShell uses lowercase names and includes `shell`; Bash uses uppercase names.
+PowerShell uses lowercase names; Bash uses uppercase names, including `SHELL`.
 For example, moving `cache` before `model` puts the countdown first.
 Each element keeps its existing width collapse priority. Extra lines keep their
 existing order.
@@ -147,10 +147,12 @@ Both scripts have a test harness in this directory. Each creates temp copies wit
 
 All lines must fit within `$WIDTH - 4`. Any overflow reports as `OVER` and exits with code 1.
 
-Note: the bash `vis_len` function uses sed to replace known multi-byte characters (▓ ░ 📁 ↑ ↓ → ✓) with single-byte placeholders before `wc -c`, because MSYS2/Git Bash does not count UTF-8 characters correctly with `awk length` or `wc -m`.
+The Bash `vis_len` function uses shell builtins to strip colors and count UTF-8 characters, including under Git Bash's C locale. Folder and circle emoji count as two columns.
 
 ## Parity: statusline.sh
 
-The Bash implementation is behind the PowerShell version. Both have: no-leading-zero cache timer, full collapse cascade, proportional bar squeezing, workflow detection with 120s recency filter. PowerShell-only: workflow phase breakdown, shell timer, agent line wrapping, resume line.
+- Unix resume commands use Bash escaping for spaces and shell metacharacters; PowerShell quotes paths containing spaces.
+- Bash counts Unicode code points for labels, with folder and circle emoji counted as two columns. PowerShell counts UTF-16 code units, so other supplementary characters can wrap differently.
+- Bash finds the latest active repo across the whole 64KB transcript tail and clears overrides that leave it. PowerShell stops at the latest cache-usage entry and can retain a cached override.
 
 Only backport changes to the Bash version when explicitly asked.

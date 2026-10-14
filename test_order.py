@@ -23,7 +23,7 @@ with tempfile.TemporaryDirectory(prefix='statusline-order-') as tmp:
             baseline = None
             for order in orders:
                 now = int(time.time())
-                cache = dict(computed_at=now + 60, has_agents=False, cache_epoch=now, cache_ttl=300, agents=[], lines_add=12, lines_del=3, branch=branch, in_git=tracked)
+                cache = dict(computed_at=now + 60, has_agents=False, cache_epoch=now - 10, cache_ttl=300, agents=[], lines_add=12, lines_del=3, branch=branch, in_git=tracked)
                 (state / '.sl_compute_order').write_text(json.dumps(cache))
                 if ext == 'ps1':
                     patched = re.sub(r'(?m)^\$SEGMENT_ORDER = .*', '$SEGMENT_ORDER = @(' + ', '.join(repr(key) for key in order.split()) + ')', source)
