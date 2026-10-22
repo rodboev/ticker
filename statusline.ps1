@@ -785,8 +785,13 @@ if ($shellEpoch -gt 0 -and $shellCount -gt 0) {
     }
 }
 
-$ctxP = [math]::Round($ctxPct)
 $ctxUsed = [math]::Round($ctxSize * $ctxPct / 100)
+# Measure against the auto-compact threshold rather than the full window
+$compactWin = [double]($env:CLAUDE_CODE_AUTO_COMPACT_WINDOW ?? 0)
+$compactPct = [double]($env:CLAUDE_AUTOCOMPACT_PCT_OVERRIDE ?? 100)
+$compactAt = $(if ($compactWin -gt 0 -and $compactWin -lt $ctxSize) { $compactWin } else { $ctxSize }) * $compactPct / 100
+$ctxPct = $ctxUsed * 100 / $compactAt
+$ctxP = [math]::Round($ctxPct)
 $uFmt = fmtTok $ctxUsed
 $segments['ctx'] = "${cGray}${uFmt} $(makeBar $ctxPct) $(tierColor $ctxPct @(30,60,80))${ctxP}%"
 $segCtxShort    = "${cGray}${uFmt} $(tierColor $ctxPct @(30,60,80))${ctxP}%"

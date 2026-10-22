@@ -635,8 +635,10 @@ if (( SHELL_EPOCH > 0 && SHELL_COUNT > 0 && _now - SHELL_EPOCH >= 3 )); then
   [ -n "$_desc_trunc" ] && SEG_SHELL+=" ${C_DIM}${_desc_trunc}"
 fi
 
-CTX_P=$(awk "BEGIN { printf \"%.0f\", $CTX_PCT }")
 CTX_USED=$(awk "BEGIN { printf \"%.0f\", $CTX_SIZE * $CTX_PCT / 100 }")
+# Measure against the auto-compact threshold rather than the full window
+CTX_PCT=$(awk -v used="$CTX_USED" -v size="$CTX_SIZE" -v win="${CLAUDE_CODE_AUTO_COMPACT_WINDOW:-0}" -v pct="${CLAUDE_AUTOCOMPACT_PCT_OVERRIDE:-100}"   'BEGIN { if (win > 0 && win < size) size = win; printf "%.2f", used * 100 / (size * pct / 100) }')
+CTX_P=$(awk "BEGIN { printf \"%.0f\", $CTX_PCT }")
 U_FMT=$(fmt_tok "${CTX_USED}")
 SEG_CTX="${C_GRAY}${U_FMT} $(make_bar "$CTX_PCT" 8) $(pct_color "$CTX_PCT")${CTX_P}%"
 SEG_CTX_SHORT="${C_GRAY}${U_FMT} $(pct_color "$CTX_PCT")${CTX_P}%"
